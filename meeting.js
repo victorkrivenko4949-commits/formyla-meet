@@ -299,7 +299,7 @@
         case 'captions': return this.toggleCaptions();
         case 'more': return this.moreMenu(btn);
         case 'view': S.view = arg; break;
-        case 'fullscreen': (document.fullscreenElement ? document.exitFullscreen() : this.layer.requestFullscreen().catch(() => toast('Полноэкранный режим недоступен в этом окне', 'bad'))); return;
+        case 'fullscreen': { const on = this.layer.classList.toggle('focus-mode'); toast(on ? 'Режим фокуса: верхняя панель скрыта (Esc — вернуть)' : 'Обычный режим', 'ok', 1800); return; }
         case 'info': return this.infoModal();
         case 'leave': return this.leaveMenu(btn);
       }
@@ -763,7 +763,7 @@
         const k = e.key.toLowerCase(); const ru = { 'ф': 'a', 'м': 'v', 'ы': 's', 'к': 'r', 'р': 'h', 'г': 'u', 'н': 'y', 'ц': 'w', 'с': 'c', 'а': 'f' };
         const a = map[k] || map[ru[k]]; if (a) { e.preventDefault(); this.action(a); }
       }
-      if (e.key === 'Escape') { this.closePop(); if (S.panel) { S.panel = null; this.renderRoom(); } }
+      if (e.key === 'Escape') { this.closePop(); this.layer.classList.remove('focus-mode'); if (S.panel) { S.panel = null; this.renderRoom(); } }
       if (e.code === 'Space' && !S.mic && !e.repeat) { S.ptt = true; if (S.stream) S.stream.getAudioTracks().forEach(t => t.enabled = true); toast('Микрофон включён, пока удерживаете пробел'); document.onkeyup = ev => { if (ev.code === 'Space' && S.ptt) { S.ptt = false; if (S.stream) S.stream.getAudioTracks().forEach(t => t.enabled = false); } }; }
     },
 
@@ -839,7 +839,6 @@
       document.onkeydown = null; document.onkeyup = null;
       this.layer.classList.add('hidden'); this.layer.innerHTML = '';
       document.body.classList.remove('in-meeting'); this.S = null;
-      if (document.fullscreenElement) document.exitFullscreen().catch(() => { });
     },
   };
   window.Meeting = M;

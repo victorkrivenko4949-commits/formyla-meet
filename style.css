@@ -618,3 +618,6 @@ body.in-meeting .toasts { bottom: 100px; }
   .tile { padding: 14px; }
   .clock-time { font-size: 48px; }
 }
+
+.meeting-layer.focus-mode .room-top { display: none; }
+.meeting-layer.focus-mode .room-body { padding-top: 10px; }
