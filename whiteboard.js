@@ -15,7 +15,8 @@
       this.color = COLORS[0];
       this.size = SIZES[1];
       this.fill = false;
-      this.bg = 'dots';
+      this.bg = opts.overlay ? 'clear' : 'dots';
+      this.overlay = !!opts.overlay;   // режим аннотаций поверх демонстрации экрана
       this.zoom = 1; this.panX = 0; this.panY = 0;
       this.drawing = null;
       this.menuOpen = false;
@@ -31,10 +32,10 @@
 
     build() {
       const r = this.root;
-      r.classList.add('wb');
+      r.classList.add('wb'); if (this.overlay) r.classList.add('wb-annot');
       r.innerHTML = `
         <div class="wb-top">
-          <div class="wb-title">${icon('board')} <input type="text" value="${this.title}" aria-label="Название доски"></div>
+          <div class="wb-title">${this.overlay ? `${icon('pen')} <span class="wb-annot-label">${this.title}</span>` : `${icon('board')} <input type="text" value="${this.title}" aria-label="Название доски">`}</div>
           <div class="wb-tools">
             <button class="wb-tool" data-tool="move" title="Перемещение / выделение (V)">${icon('cursor')}</button>
             <button class="wb-tool active" data-tool="pen" title="Перо (P)">${icon('pen')}</button>
@@ -64,10 +65,11 @@
             <button class="wb-tool" data-act="clear" title="Очистить страницу">${icon('trash')}</button>
             <span class="wb-sep"></span>
             <button class="wb-tool" data-act="menu" title="Ещё">${icon('more')}</button>
-            ${this.opts.onClose ? `<button class="wb-tool" data-act="close" title="Закрыть доску">${icon('x')}</button>` : ''}
+            ${this.overlay ? `<button class="wb-tool" data-act="hide" title="Скрыть панель (рисунок останется)">${icon('chevUp')}</button>` : ''}
+            ${this.opts.onClose ? `<button class="wb-tool" data-act="close" title="${this.overlay ? 'Завершить комментирование' : 'Закрыть доску'}">${icon('x')}</button>` : ''}
           </div>
         </div>
-        <div class="wb-canvas-wrap dots">
+        <div class="wb-canvas-wrap ${this.bg}">
           <canvas></canvas>
           <div class="wb-cursors"></div>
         </div>
@@ -83,6 +85,7 @@
         </div>`;
       this.canvas = r.querySelector('canvas');
       this.ctx = this.canvas.getContext('2d');
+      if (this.overlay) { const t = r.querySelector('.wb-title'); ['hide', 'close'].forEach(a => { const b = r.querySelector(`[data-act=${a}]`); if (b) t.appendChild(b); }); }
       this.wrap = r.querySelector('.wb-canvas-wrap');
       this.cursorsEl = r.querySelector('.wb-cursors');
       this.renderPages();
@@ -91,7 +94,7 @@
 
     bind() {
       const r = this.root;
-      r.querySelector('.wb-title input').addEventListener('input', e => { this.title = e.target.value; });
+      const ti = r.querySelector('.wb-title input'); if (ti) ti.addEventListener('input', e => { this.title = e.target.value; });
       r.querySelectorAll('[data-tool]').forEach(b => b.addEventListener('click', () => this.setTool(b.dataset.tool)));
       r.querySelectorAll('.wb-color[data-color]').forEach(b => b.addEventListener('click', () => this.setColor(b.dataset.color)));
       r.querySelector('.wb-custom').addEventListener('input', e => this.setColor(e.target.value, true));
@@ -164,6 +167,7 @@
         case 'zoomReset': this.zoom = 1; this.panX = 0; this.panY = 0; this.updateZoomLabel(); return this.render();
         case 'menu': return this.toggleMenu();
         case 'close': return this.opts.onClose && this.opts.onClose();
+        case 'hide': { const top = this.root.querySelector('.wb-top'); const hidden = top.classList.toggle('collapsed'); e.currentTarget.innerHTML = icon(hidden ? 'chevDown' : 'chevUp'); e.currentTarget.title = hidden ? 'Показать панель' : 'Скрыть панель (рисунок останется)'; return; }
       }
     }
 
@@ -172,7 +176,7 @@
       if (old) { old.remove(); return; }
       const m = document.createElement('div');
       m.className = 'wb-menu';
-      m.innerHTML = `
+      m.innerHTML = (this.overlay ? '' : `
         <h5>Фон</h5>
         <button data-bg="plain">${icon('square')} Без сетки ${this.bg === 'plain' ? icon('check') : ''}</button>
         <button data-bg="grid">${icon('grid')} Клетка ${this.bg === 'grid' ? icon('check') : ''}</button>
@@ -182,9 +186,9 @@
         <button data-m="addPage">${icon('plus')} Добавить страницу</button>
         <button data-m="dupPage">${icon('copy')} Дублировать страницу</button>
         <button data-m="delPage" ${this.pages.length < 2 ? 'disabled' : ''}>${icon('trash')} Удалить страницу</button>
-        <hr>
+        <hr>`) + `
         <h5>Файл</h5>
-        <button data-m="exportPng">${icon('image')} Экспорт в PNG</button>
+        <button data-m="exportPng">${icon('image')} ${this.overlay ? 'Снимок экрана с пометками (PNG)' : 'Экспорт в PNG'}</button>
         <button data-m="exportJson">${icon('download')} Сохранить (.json)</button>
         <label>${icon('upload')} Открыть (.json)<input type="file" accept="application/json" class="sr-only"></label>
         <hr>
@@ -429,7 +433,10 @@
       const W = this.canvas.width, H = this.canvas.height;
       off.width = W; off.height = H;
       const c = off.getContext('2d');
-      c.fillStyle = '#ffffff'; c.fillRect(0, 0, W, H);
+      c.fillStyle = this.overlay ? '#0b1220' : '#ffffff'; c.fillRect(0, 0, W, H);
+      // в режиме аннотаций подкладываем кадр демонстрации экрана (если есть)
+      const under = this.opts.underlay && this.opts.underlay();
+      if (under && under.videoWidth) { try { const vr = under.videoWidth / under.videoHeight, tr = W / H; let dw = W, dh = H; if (vr > tr) dh = W / vr; else dw = H * vr; c.drawImage(under, (W - dw) / 2, (H - dh) / 2, dw, dh); } catch (e) { /* кадр недоступен */ } }
       c.drawImage(this.canvas, 0, 0);
       const url = off.toDataURL('image/png');
       const w = window.open();
@@ -450,7 +457,7 @@
         try {
           const d = JSON.parse(r.result);
           this.pages = d.pages.map(p => ({ shapes: p.shapes, undo: [], redo: [] })); this.page = 0;
-          this.title = d.title || this.title; this.root.querySelector('.wb-title input').value = this.title;
+          this.title = d.title || this.title; const ti = this.root.querySelector('.wb-title input'); if (ti) ti.value = this.title;
           this.bg = d.bg || this.bg; this.setTool(this.tool); this.renderPages(); this.render();
           window.toast && toast('Доска загружена', 'ok');
         } catch (e) { window.toast && toast('Не удалось прочитать файл доски', 'bad'); }

@@ -228,7 +228,7 @@
       let html = '';
       if (S.sharing || S.wbShared) {
         html = `<div class="share-stage">
-          <div class="share-main" id="shareMain">${S.wbShared ? '' : `<span class="share-label">${S.sharing === 'me' ? 'Вы демонстрируете экран' : esc(S.sharing) + ' демонстрирует экран'}</span>`}</div>
+          <div class="share-main" id="shareMain">${S.wbShared ? '' : `<span class="share-label">${S.sharing === 'me' ? 'Вы демонстрируете экран' : esc(S.sharing) + ' демонстрирует экран'}</span><div class="share-actions">${S.annot ? '' : `<button class="btn-ghost btn-sm" data-a="annotate" title="Рисовать поверх экрана">${icon('pen')} Комментировать</button>`}${S.sharing === 'me' ? `<button class="btn-danger btn-sm" data-a="share">${icon('stop')} Стоп показ</button>` : ''}</div>`}</div>
           <div class="share-side">${all.map(p => tile(p)).join('')}</div></div>`;
       } else if (S.view === 'speaker') {
         const mainId = S.spotlight || S.pinned || (S.participants.find(p => p.speaking) || {}).id || S.participants[0]?.id || 'me';
@@ -248,6 +248,8 @@
         $('#shareMain', st).insertAdjacentHTML('beforeend', `<div style="position:absolute;inset:0;display:grid;place-items:center;background:linear-gradient(135deg,#0f172a,#1e1b4b);color:#94a3b8;font-weight:700">Демонстрация экрана участника (демо)</div>`);
       }
       if (S.wbShared) this.mountWhiteboard($('#shareMain', st));
+      if (S.sharing && !S.wbShared && S.annot) this.mountAnnotations($('#shareMain', st));
+      st.querySelectorAll('[data-a]').forEach(b => b.addEventListener('click', e => { e.stopPropagation(); this.action(b.dataset.a, b); }));
       st.querySelectorAll('[data-t]').forEach(b => b.addEventListener('click', e => { e.stopPropagation(); this.tileAction(b.dataset.t, b); }));
       st.querySelectorAll('.tile-v').forEach(t => t.addEventListener('dblclick', () => { S.view = 'speaker'; S.pinned = t.dataset.id; this.renderRoom(); }));
     },
@@ -332,6 +334,7 @@
         case 'reactions': return this.reactionsMenu(btn);
         case 'hand': S.hand = !S.hand; S.chat.push({ sys: true, text: S.hand ? 'Вы подняли руку' : 'Вы опустили руку' }); break;
         case 'whiteboard': return this.toggleWhiteboard();
+        case 'annotate': return this.toggleAnnotations();
         case 'captions': return this.toggleCaptions();
         case 'more': return this.moreMenu(btn);
         case 'view': S.view = arg; break;
@@ -458,6 +461,7 @@
         <button data-sh="wb">${icon('board')} Доска для совместной работы</button>
         <button data-sh="cam2">${icon('video')} Вторая камера (документ-камера)</button>
         <button data-sh="audio">${icon('volume')} Только звук компьютера</button>
+        <button data-sh="annot" ${S.sharing ? '' : 'disabled'}>${icon('pen')} Комментировать поверх экрана</button>
         <hr>
         <button data-sh="multi">${icon('users')} Разрешить одновременный показ нескольким</button>`, m => {
         m.querySelectorAll('[data-sh]').forEach(b => b.addEventListener('click', () => {
@@ -466,6 +470,7 @@
           if (k === 'wb') this.toggleWhiteboard(true);
           if (k === 'cam2') toast('Подключите вторую камеру — она появится в списке камер');
           if (k === 'audio') this.startShare(true);
+          if (k === 'annot') this.toggleAnnotations();
           if (k === 'multi') toast('Одновременная демонстрация разрешена');
         }));
       });
@@ -580,7 +585,27 @@
     stopShare() {
       const S = this.S; if (S.displayStream) S.displayStream.getTracks().forEach(t => t.stop()); S.displayStream = null;
       if (S.sharing === 'me') S.chat.push({ sys: true, text: 'Вы остановили демонстрацию экрана' });
-      S.sharing = null; this.renderRoom();
+      S.sharing = null; this.closeAnnotations(); this.renderRoom();
+    },
+
+    /* ---------- аннотации поверх демонстрации экрана ---------- */
+    toggleAnnotations() {
+      const S = this.S;
+      if (!S.sharing) return toast('Сначала начните демонстрацию экрана', 'bad');
+      if (S.annot) { this.closeAnnotations(); } else { S.annot = true; S.chat.push({ sys: true, text: 'Вы начали комментировать демонстрацию экрана' }); toast('Рисуйте поверх экрана — инструменты вверху. Пометки видят все участники', 'ok', 3500); }
+      this.renderRoom();
+    },
+    closeAnnotations() {
+      const S = this.S; if (S.annotWb) { S.annotWb.destroy(); S.annotWb = null; } S.annotPages = null; S.annot = false;
+    },
+    mountAnnotations(container) {
+      const S = this.S;
+      const host = document.createElement('div'); host.className = 'annot-layer';
+      container.appendChild(host);
+      const saved = S.annotWb ? { pages: S.annotWb.pages, page: S.annotWb.page, tool: S.annotWb.tool, color: S.annotWb.color, size: S.annotWb.size, collapsed: !!S.annotWb.root.querySelector('.wb-top.collapsed') } : null;
+      if (S.annotWb) S.annotWb.destroy();
+      S.annotWb = new Whiteboard(host, { overlay: true, title: 'Комментирование экрана', onClose: () => { this.closeAnnotations(); this.renderRoom(); }, underlay: () => this.shareVideo, collaborators: S.participants.slice(0, 2).map(p => ({ name: p.name.split(' ')[0], initials: p.initials, color: p.solid })) });
+      if (saved) { S.annotWb.pages = saved.pages; S.annotWb.page = saved.page; S.annotWb.setColor(saved.color); S.annotWb.size = saved.size; S.annotWb.setTool(saved.tool); S.annotWb.render(); if (saved.collapsed) S.annotWb.root.querySelector('[data-act=hide]').click(); }
     },
 
     /* ---------- доска ---------- */

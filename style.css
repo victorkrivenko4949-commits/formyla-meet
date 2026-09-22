@@ -613,3 +613,25 @@ body.in-meeting .toasts { bottom: 100px; right: auto; left: 50%; transform: tran
 .perm-box .perm-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
 
 .popover button.danger-text, .danger-text { color: #f87171; }
+
+/* ---------- Аннотации поверх демонстрации экрана ---------- */
+.share-actions { position: absolute; top: 12px; right: 12px; z-index: 35; display: flex; gap: 8px; }
+.share-actions .btn-ghost, .share-actions .btn-danger { backdrop-filter: blur(8px); }
+.annot-layer { position: absolute; inset: 0; z-index: 32; }
+.wb.wb-annot { background: transparent; color: #fff; }
+.wb-annot .wb-top { position: absolute; top: 10px; left: 10px; z-index: 3; width: max-content; max-width: calc(100% - 180px); row-gap: 4px; border-radius: 14px; background: rgba(10, 14, 28, .92); border: 1px solid rgba(139,92,246,.45); box-shadow: var(--shadow-card); padding: 6px 10px; color: #e2e8f0; transition: transform .2s, opacity .2s; }
+.wb-annot .wb-top.collapsed { padding: 4px 6px; }
+.wb-annot .wb-annot-label { font-weight: 700; font-size: 12px; white-space: nowrap; color: #a5b4fc; }
+.wb-annot .wb-title { gap: 6px; width: 100%; display: flex; align-items: center; }
+.wb-annot .wb-title .wb-annot-label { margin-right: auto; }
+.wb-annot .wb-top.collapsed { width: auto; }
+.wb-annot .wb-top.collapsed .wb-title .wb-annot-label, .wb-annot .wb-top.collapsed .wb-title > svg, .wb-annot .wb-top.collapsed .wb-tools, .wb-annot .wb-top.collapsed [data-act=close] { display: none; }
+.wb-annot .wb-tool { color: #cbd5e1; }
+.wb-annot .wb-tool:hover { background: rgba(255,255,255,.1); color: #fff; }
+.wb-annot .wb-tool.active { background: rgba(139,92,246,.35); color: #fff; }
+.wb-annot .wb-sep { background: rgba(255,255,255,.15); }
+.wb-annot .wb-size i { background: #e2e8f0; }
+.wb-annot .wb-size.active { background: rgba(139,92,246,.35); }
+.wb-annot .wb-canvas-wrap, .wb-annot .wb-canvas-wrap.clear { background: transparent; background-image: none; }
+.wb-annot .wb-bottom { display: none; }
+.wb-annot .wb-menu { color: #0f172a; }
