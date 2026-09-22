@@ -13,46 +13,19 @@
 </head>
 <body>
 
-<!-- ===== Шапка сайта (как на FORMYLA.net) ===== -->
-<header class="header" id="siteHeader">
-  <a href="#/home" class="logo" aria-label="FORMYLA Meet — на главную">
-    <svg class="site-logo" width="224" height="56" viewBox="0 0 440 100" preserveAspectRatio="xMidYMid meet" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="FORMYLA Meet">
-      <defs>
-        <linearGradient id="grad_logo" x1="0%" y1="0%" x2="0%" y2="100%">
-          <stop offset="0%" stop-color="#38ef7d"/>
-          <stop offset="100%" stop-color="#11998e"/>
-        </linearGradient>
-      </defs>
-      <polygon points="50,20 75,35 75,65 50,80 25,65 25,35" fill="none" stroke="url(#grad_logo)" stroke-width="4"/>
-      <polyline points="35,42 50,50 50,80" fill="none" stroke="url(#grad_logo)" stroke-width="4"/>
-      <line x1="50" y1="50" x2="65" y2="42" stroke="url(#grad_logo)" stroke-width="4"/>
-      <circle cx="50" cy="50" r="4" fill="#fff"/>
-      <text x="96" y="64" font-family="Satoshi, 'Segoe UI', sans-serif" font-style="italic" font-weight="900" font-size="38" fill="#ffffff" letter-spacing="2">FORMYLA</text>
-      <text x="312" y="64" font-family="Satoshi, 'Segoe UI', sans-serif" font-weight="500" font-size="30" fill="#38bdf8" letter-spacing="1">Meet</text>
-    </svg>
-  </a>
-
-  <button class="nav-burger" id="navBurger" aria-label="Меню" aria-expanded="false">
-    <span></span><span></span><span></span>
-  </button>
-
-  <nav class="nav" id="navLinks">
-    <a href="#/home" class="nav-item" data-route="home">🏠 Главная</a>
-    <a href="#/meetings" class="nav-item" data-route="meetings">📅 Встречи</a>
-    <a href="#/recordings" class="nav-item" data-route="recordings">🎥 Записи</a>
-    <a href="#/contacts" class="nav-item" data-route="contacts">👥 Контакты</a>
-    <a href="#/whiteboard" class="nav-item" data-route="whiteboard">🧑‍🏫 Доска</a>
-    <a href="#/settings" class="nav-item" data-route="settings">⚙️ Настройки</a>
+<!-- ===== Раздел «Видеовстречи» (без собственной шапки — используется шапка FORMYLA.net) ===== -->
+<div id="fm">
+<div class="fm-bar">
+  <nav class="fm-tabs" id="navLinks" aria-label="Разделы видеовстреч">
+    <a href="#/home" class="fm-tab" data-route="home">🏠 Главная</a>
+    <a href="#/meetings" class="fm-tab" data-route="meetings">📅 Встречи</a>
+    <a href="#/recordings" class="fm-tab" data-route="recordings">🎥 Записи</a>
+    <a href="#/contacts" class="fm-tab" data-route="contacts">👥 Контакты</a>
+    <a href="#/whiteboard" class="fm-tab" data-route="whiteboard">🧑‍🏫 Доска</a>
+    <a href="#/settings" class="fm-tab" data-route="settings">⚙️ Настройки</a>
   </nav>
-
-  <div class="header-right">
-    <button class="btn-gradient" id="headerNewMeeting">＋ Новая встреча</button>
-    <button class="user-chip" id="userChip" title="Профиль">
-      <span class="avatar avatar-sm" id="userAvatar">АК</span>
-      <span class="user-chip-name" id="userChipName">Алёна</span>
-    </button>
-  </div>
-</header>
+  <button class="btn-gradient btn-sm" id="headerNewMeeting">＋ Новая встреча</button>
+</div>
 
 <!-- ===== Основной контент (маршруты) ===== -->
 <main class="main" id="app"></main>
@@ -65,6 +38,7 @@
 
 <!-- ===== Модальные окна ===== -->
 <div class="modal-root hidden" id="modalRoot"></div>
+</div><!-- /#fm -->
 
 <script src="./icons.js"></script>
 <script src="./whiteboard.js"></script>

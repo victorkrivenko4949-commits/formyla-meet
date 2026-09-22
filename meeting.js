@@ -35,15 +35,14 @@
         const constraints = { video: S.cam ? { width: { ideal: S.hd ? 1280 : 640 }, height: { ideal: S.hd ? 720 : 360 }, deviceId: App.settings.camId ? { exact: App.settings.camId } : undefined } : false, audio: S.mic || !S.joined ? { echoCancellation: true, noiseSuppression: S.noise, deviceId: App.settings.micId ? { exact: App.settings.micId } : undefined } : false };
         if (!constraints.video && !constraints.audio) { S.stream = null; this.attachSelf(); return; }
         S.stream = await navigator.mediaDevices.getUserMedia(constraints);
-        S.mediaError = null;
-        this.attachSelf();
+        S.mediaError = null; S.permState = 'granted';
+        this.attachSelf(); this.renderPermBox();
         this.startLevelMeter();
         App.refreshDevices && App.refreshDevices();
       } catch (e) {
-        S.stream = null; S.mediaError = e.name;
-        this.attachSelf();
-        if (e.name === 'NotAllowedError' || e.name === 'SecurityError') toast('Доступ к камере/микрофону не разрешён — покажем аватар вместо видео', 'bad', 5000);
-        else if (e.name === 'NotFoundError') toast('Камера или микрофон не найдены', 'bad');
+        S.stream = null; S.mediaError = e.name; S.permState = (e.name === 'NotAllowedError' || e.name === 'SecurityError') ? 'denied' : 'error';
+        this.attachSelf(); this.renderPermBox();
+        if (e.name === 'NotFoundError') toast('Камера или микрофон не найдены', 'bad');
       }
     },
 
@@ -98,6 +97,7 @@
             <h2>Готовы подключиться?</h2>
             <p class="muted">${S.isHost ? 'Вы организатор этой встречи. Участники ' + (S.waitingRoom ? 'будут ждать вашего разрешения в зале ожидания.' : 'подключаются сразу.') : 'Организатор: Мария Иванова. Никто больше не подключился — вы первые.'}</p>
             <div class="form-stack">
+              <div id="permBox"></div>
               <label class="field">Ваше имя<input type="text" id="pjName" value="${esc(S.name)}" maxlength="40"></label>
               ${S.pw && !S.isHost ? `<label class="field">Код доступа<input type="password" id="pjPw" placeholder="Введите код"></label>` : ''}
               <div><div class="small muted" style="margin-bottom:6px">Уровень микрофона</div><div class="level-meter"><i></i></div></div>
@@ -112,6 +112,42 @@
         </div>`;
       this.attachSelf();
       this.layer.querySelectorAll('[data-a]').forEach(b => b.addEventListener('click', () => this.prejoinAction(b.dataset.a)));
+      this.renderPermBox();
+    },
+
+    /* ---------- Разрешения на камеру и микрофон ---------- */
+    inFrame() { try { return window.self !== window.top; } catch (e) { return true; } },
+    async queryPermissions() {
+      if (!navigator.permissions || !navigator.permissions.query) return null;
+      try {
+        const [c, m] = await Promise.all([navigator.permissions.query({ name: 'camera' }), navigator.permissions.query({ name: 'microphone' })]);
+        return { camera: c.state, microphone: m.state };
+      } catch (e) { return null; }
+    },
+    async requestPermissions() {
+      const S = this.S;
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { toast('Браузер не поддерживает доступ к камере и микрофону', 'bad'); return; }
+      if (!window.isSecureContext) { toast('Доступ к камере возможен только по HTTPS', 'bad', 5000); return; }
+      toast('Разрешите доступ в окне браузера', 'info', 3000);
+      await this.getMedia();
+      if (S.permState === 'granted') toast('Доступ к камере и микрофону разрешён', 'ok');
+    },
+    async renderPermBox() {
+      const S = this.S; const box = this.layer && this.layer.querySelector('#permBox'); if (!box) return;
+      const perm = await this.queryPermissions();
+      const granted = S.permState === 'granted' || (perm && perm.camera === 'granted' && perm.microphone === 'granted' && S.stream);
+      const denied = S.permState === 'denied' || (perm && (perm.camera === 'denied' || perm.microphone === 'denied'));
+      const frame = this.inFrame();
+      if (granted) {
+        box.innerHTML = `<div class="perm-box ok">${icon('check')}<div><b>Камера и микрофон подключены</b><div class="small muted">Доступ разрешён. Устройства можно сменить в настройках микрофона и камеры.</div></div></div>`;
+        return;
+      }
+      const why = !window.isSecureContext ? 'Страница открыта не по HTTPS — браузер не даст доступ к устройствам.' : denied ? 'Браузер заблокировал доступ. Нажмите на значок замка или камеры в адресной строке, разрешите камеру и микрофон и нажмите «Запросить снова».' : S.permState === 'error' ? 'Не удалось запустить камеру или микрофон: устройство не найдено или занято другим приложением.' : 'Нажмите «Разрешить доступ» и подтвердите запрос браузера — иначе участники не увидят и не услышат вас.';
+      box.innerHTML = `<div class="perm-box ${denied ? 'bad' : ''}">${icon(denied ? 'videoOff' : 'shield')}<div><b>${denied ? 'Доступ к камере и микрофону запрещён' : 'Нужен доступ к камере и микрофону'}</b><div class="small muted">${why}${frame ? ' Приложение открыто во встроенном окне: если запрос не появляется, откройте его в отдельной вкладке.' : ''}</div>
+        <div class="perm-actions"><button class="btn-gradient btn-sm" data-p="ask">${icon('mic')} ${denied ? 'Запросить снова' : 'Разрешить доступ'}</button>${frame ? `<button class="btn-ghost btn-sm" data-p="tab">${icon('maximize')} Открыть в отдельной вкладке</button>` : ''}<button class="btn-ghost btn-sm" data-p="skip">Продолжить без камеры</button></div></div></div>`;
+      box.querySelector('[data-p="ask"]').onclick = () => this.requestPermissions();
+      const t = box.querySelector('[data-p="tab"]'); if (t) t.onclick = () => window.open(location.href, '_blank', 'noopener');
+      box.querySelector('[data-p="skip"]').onclick = () => { S.cam = false; S.mic = false; box.innerHTML = ''; this.renderPrejoin(); };
     },
     prejoinAction(a) {
       const S = this.S;
@@ -235,7 +271,7 @@
         <button data-pm="hand" ${p.hand ? '' : 'disabled'}>${icon('hand')} Опустить руку</button>
         <hr>
         <button data-pm="waiting">${icon('clock')} Отправить в зал ожидания</button>
-        <button data-pm="remove" style="color:#f87171">${icon('userX')} Удалить из встречи</button>`, m => {
+        <button data-pm="remove" class="danger-text">${icon('userX')} Удалить из встречи</button>`, m => {
         m.querySelectorAll('[data-pm]').forEach(b => b.addEventListener('click', () => {
           const a = b.dataset.pm; this.closePop();
           if (a === 'mute') { if (p.mic) { p.mic = false; toast(`Микрофон ${p.name} выключен`); } else { toast(`Запрос отправлен: ${p.name} включит микрофон`); setTimeout(() => { p.mic = true; this.renderStage(); this.renderPanel(); }, 2500); } }
@@ -406,7 +442,7 @@
         ${row('allowUnmute', 'Включать свой микрофон', S.allowUnmute)}
         <hr>
         <button data-s="muteAll">${icon('micOff')} Выключить звук всем</button>
-        <button data-s="suspend" style="color:#f87171">${icon('shield')} Приостановить действия участников</button>`, m => {
+        <button data-s="suspend" class="danger-text">${icon('shield')} Приостановить действия участников</button>`, m => {
         m.querySelectorAll('[data-s]').forEach(b => b.addEventListener('click', () => {
           const k = b.dataset.s;
           if (k === 'muteAll') { S.participants.forEach(p => p.mic = false); toast('Звук выключен у всех участников'); }
@@ -517,7 +553,7 @@
     },
     leaveMenu(btn) {
       const S = this.S;
-      this.popover(btn, `${S.isHost ? `<button data-l="end" style="color:#f87171">${icon('phone')} Завершить встречу для всех</button><button data-l="assign">${icon('crown')} Выйти и назначить организатора</button>` : ''}<button data-l="leave">${icon('logout')} Покинуть встречу</button>`, m => {
+      this.popover(btn, `${S.isHost ? `<button data-l="end" class="danger-text">${icon('phone')} Завершить встречу для всех</button><button data-l="assign">${icon('crown')} Выйти и назначить организатора</button>` : ''}<button data-l="leave">${icon('logout')} Покинуть встречу</button>`, m => {
         m.querySelectorAll('[data-l]').forEach(b => b.addEventListener('click', () => {
           const k = b.dataset.l; this.closePop();
           if (k === 'assign') { const p = S.participants[0]; if (p) toast(`${p.name} назначен организатором`); }

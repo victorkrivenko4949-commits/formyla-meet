@@ -18,8 +18,7 @@
       const hash = location.hash.replace(/^#\/?/, '') || 'home';
       const [name, ...rest] = hash.split('/');
       const arg = rest.join('/');
-      document.querySelectorAll('.nav-item').forEach(a => a.classList.toggle('active', a.dataset.route === name));
-      $('#navLinks').classList.remove('open');
+      document.querySelectorAll('.fm-tab').forEach(a => a.classList.toggle('active', a.dataset.route === name));
       if (this.wbPage) { this.wbPage.destroy(); this.wbPage = null; }
       const page = this.routes[name] || this.routes.home;
       $('#app').innerHTML = '';
@@ -29,9 +28,9 @@
 
     init() {
       window.addEventListener('hashchange', () => this.route());
-      $('#navBurger').addEventListener('click', () => { const n = $('#navLinks'); n.classList.toggle('open'); $('#navBurger').setAttribute('aria-expanded', n.classList.contains('open')); });
+      // Имя пользователя FORMYLA.net (задаётся шаблоном: window.FM_USER = {name, email})
+      if (window.FM_USER && window.FM_USER.name) { this.user.name = window.FM_USER.name; this.user.initials = SIM.initials(window.FM_USER.name); if (window.FM_USER.email) this.user.email = window.FM_USER.email; }
       $('#headerNewMeeting').addEventListener('click', () => this.newMeeting());
-      $('#userChip').addEventListener('click', () => this.profileModal());
       this.refreshDevices();
       navigator.mediaDevices && navigator.mediaDevices.addEventListener && navigator.mediaDevices.addEventListener('devicechange', () => this.refreshDevices());
       this.route();
@@ -43,6 +42,20 @@
         const list = await navigator.mediaDevices.enumerateDevices();
         this.devices.mics = list.filter(d => d.kind === 'audioinput'); this.devices.cams = list.filter(d => d.kind === 'videoinput'); this.devices.speakers = list.filter(d => d.kind === 'audiooutput');
       } catch (e) { /* нет доступа */ }
+    },
+    async requestMedia() {
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { toast('Браузер не поддерживает доступ к камере и микрофону', 'bad'); return false; }
+      if (!window.isSecureContext) { toast('Доступ к камере возможен только по HTTPS', 'bad', 5000); return false; }
+      try {
+        const s = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
+        s.getTracks().forEach(t => t.stop());
+        await this.refreshDevices(); toast('Доступ к камере и микрофону разрешён', 'ok'); return true;
+      } catch (e) {
+        if (e.name === 'NotAllowedError' || e.name === 'SecurityError') toast('Доступ запрещён. Разрешите камеру и микрофон через значок замка в адресной строке', 'bad', 6000);
+        else if (e.name === 'NotFoundError') toast('Камера или микрофон не найдены', 'bad');
+        else toast('Не удалось получить доступ: ' + e.name, 'bad');
+        return false;
+      }
     },
     linkify(t) { return t.replace(/((https?:\/\/|www\.)[^\s<]+|formyla\.net[^\s<]*)/g, m => `<a href="${m.startsWith('http') ? m : 'https://' + m}" target="_blank" rel="noopener noreferrer" style="color:#7dd3fc;text-decoration:underline">${m}</a>`); },
 
@@ -72,7 +85,7 @@
         <label class="field">Статус<select id="pfStatus"><option>В сети</option><option>Не беспокоить</option><option>Отошёл</option><option>Невидимый</option></select></label>`,
         [{ label: 'Отмена', cls: 'btn-ghost', act: 'close' }, { label: 'Сохранить', cls: 'btn-gradient', act: 'ok' }], null, () => {
           App.user.name = $('#pfName').value.trim() || App.user.name; App.user.initials = SIM.initials(App.user.name) || 'Я'; App.user.pmi = $('#pfPmi').value.trim() || App.user.pmi;
-          $('#userChipName').textContent = App.user.name.split(' ')[0]; $('#userAvatar').textContent = App.user.initials; toast('Профиль сохранён', 'ok'); this.route();
+          toast('Профиль сохранён', 'ok'); this.route();
         });
     },
 
@@ -317,10 +330,12 @@
     const sw = (k, t, d) => `<div class="setting-row"><div><div class="setting-title">${t}</div>${d ? `<div class="setting-desc">${d}</div>` : ''}</div><label class="switch"><input type="checkbox" data-set="${k}" ${S[k] ? 'checked' : ''}><span class="track"></span></label></div>`;
     const sel = (k, t, opts) => `<div class="setting-row"><div class="setting-title">${t}</div><select data-set="${k}" style="width:auto;min-width:200px">${opts.map(([v, l]) => `<option value="${v}" ${S[k] == v ? 'selected' : ''}>${l}</option>`).join('')}</select></div>`;
     const dev = (k, t, arr) => `<div class="setting-row"><div class="setting-title">${t}</div><select data-set="${k}" style="width:auto;min-width:220px">${arr.length ? arr.map(x => `<option value="${x.deviceId}" ${S[k] === x.deviceId ? 'selected' : ''}>${esc(x.label || 'Устройство')}</option>`).join('') : '<option value="">Разрешите доступ, чтобы увидеть устройства</option>'}</select></div>`;
+    const noLabels = !(this.devices.cams.some(d => d.label) || this.devices.mics.some(d => d.label));
+    const perm = noLabels ? `<div class="perm-box" style="margin-bottom:12px">${icon('shield')}<div><b>Нужен доступ к камере и микрофону</b><div class="small muted">Разрешите доступ, чтобы выбрать устройства и проверить их. Браузер покажет запрос один раз.</div><div class="perm-actions"><button class="btn-gradient btn-sm" data-act="askPerm">${icon('mic')} Разрешить доступ</button></div></div></div>` : '';
     const content = {
       general: sw('joinAudio', 'Автоматически подключать звук компьютера') + sw('muteOnJoin', 'Выключать мой микрофон при входе') + sw('camOffOnJoin', 'Выключать моё видео при входе') + sw('notifications', 'Уведомления о начале встреч', 'Напоминание за 5 минут') + sw('showTimer', 'Показывать длительность встречи') + sw('dualMonitor', 'Режим двух мониторов') + sel('theme', 'Тема', [['dark', 'Тёмная (FORMYLA)'], ['auto', 'Как в системе']]) + sel('lang', 'Язык', [['ru', 'Русский'], ['en', 'English'], ['bg', 'Български']]),
-      video: dev('camId', 'Камера', this.devices.cams) + sw('mirror', 'Зеркальное отображение моего видео') + sw('hd', 'HD-видео (720p)', 'Требует больше трафика') + sw('camOffOnJoin', 'Выключать видео при входе') + `<div class="setting-row"><div class="setting-title">Предпросмотр</div><button class="btn-ghost btn-sm" data-act="camTest">${icon('video')} Проверить камеру</button></div>`,
-      audio: dev('micId', 'Микрофон', this.devices.mics) + dev('spkId', 'Динамики', this.devices.speakers) + sw('joinAudio', 'Подключать звук компьютера автоматически') + sw('muteOnJoin', 'Выключать микрофон при входе') + `<div class="setting-row"><div><div class="setting-title">Подавление фонового шума</div><div class="setting-desc">Автоматически, на основе noiseSuppression</div></div><select style="width:auto"><option>Авто</option><option>Слабое</option><option>Среднее</option><option>Сильное</option></select></div>` + `<div class="setting-row"><div class="setting-title">Проверка</div><button class="btn-ghost btn-sm" data-act="micTest">${icon('volume')} Проверить микрофон и динамики</button></div>`,
+      video: perm + dev('camId', 'Камера', this.devices.cams) + sw('mirror', 'Зеркальное отображение моего видео') + sw('hd', 'HD-видео (720p)', 'Требует больше трафика') + sw('camOffOnJoin', 'Выключать видео при входе') + `<div class="setting-row"><div class="setting-title">Предпросмотр</div><button class="btn-ghost btn-sm" data-act="camTest">${icon('video')} Проверить камеру</button></div>`,
+      audio: perm + dev('micId', 'Микрофон', this.devices.mics) + dev('spkId', 'Динамики', this.devices.speakers) + sw('joinAudio', 'Подключать звук компьютера автоматически') + sw('muteOnJoin', 'Выключать микрофон при входе') + `<div class="setting-row"><div><div class="setting-title">Подавление фонового шума</div><div class="setting-desc">Автоматически, на основе noiseSuppression</div></div><select style="width:auto"><option>Авто</option><option>Слабое</option><option>Среднее</option><option>Сильное</option></select></div>` + `<div class="setting-row"><div class="setting-title">Проверка</div><button class="btn-ghost btn-sm" data-act="micTest">${icon('volume')} Проверить микрофон и динамики</button></div>`,
       bg: `<p class="muted small" style="margin-bottom:10px">Выбранный фон применяется к вашему видео во всех встречах.</p><div class="cards-grid" style="grid-template-columns:repeat(3,1fr)">${[['none', 'Без фона', 'linear-gradient(135deg,#1e293b,#0f172a)'], ['blur', 'Размытие', 'linear-gradient(135deg,#334155,#64748b)'], ['soft', 'Мягкий свет', 'linear-gradient(135deg,#fbbf24,#f472b6)'], ['formyla', 'FORMYLA', 'radial-gradient(circle at 30% 30%,rgba(56,189,248,.5),transparent 50%),radial-gradient(circle at 70% 70%,rgba(139,92,246,.5),transparent 50%),#0f172a'], ['board', 'Аудитория', 'linear-gradient(180deg,#1e3a5f,#0b1220)'], ['geo', 'Геометрия', 'repeating-linear-gradient(45deg,#1e293b 0 10px,#0f172a 10px 20px)']].map(([k, l, bg]) => `<button class="tile" data-bgset="${k}" style="padding:10px;gap:8px;${S.bg === k ? 'border-color:#8b5cf6' : ''}"><span style="display:block;width:100%;aspect-ratio:16/9;border-radius:10px;background:${bg}"></span><span class="tile-title" style="font-size:13px">${l}</span></button>`).join('')}</div>` + sw('reactionsSkin', 'Анимированные реакции', 'Показывать эмодзи поверх видео'),
       share: sw('allowShareSound', 'Передавать звук компьютера при демонстрации') + sw('optimizeVideo', 'Оптимизировать для видеоклипов') + sw('shareSideBySide', 'Режим «рядом»: экран и участники') + sw('shareWbAuto', 'Открывать доску в полноэкранном режиме') + sel('shareWindowMode', 'При демонстрации окна', [['fit', 'Подгонять под окно'], ['orig', 'Исходный размер']]),
       record: sw('autoRecord', 'Автоматически записывать встречи, которые я организую') + sw('recLocal', 'Локальная запись (WebM)', 'Сохраняется в браузере, доступна в разделе «Записи»') + sw('recAudioSeparate', 'Отдельная аудиодорожка каждого участника') + sw('recTimestamp', 'Добавлять метку времени в запись') + sw('recNames', 'Показывать имена участников') + sw('recChat', 'Сохранять чат вместе с записью'),
@@ -332,6 +347,7 @@
     root.querySelectorAll('[data-tab]').forEach(b => b.addEventListener('click', () => { if (compact) this.renderSettings(root, b.dataset.tab, true); else location.hash = '#/settings/' + b.dataset.tab; }));
     root.querySelectorAll('[data-set]').forEach(el => el.addEventListener('change', () => { S[el.dataset.set] = el.type === 'checkbox' ? el.checked : el.value; if (el.dataset.set === 'mirror' && Meeting.S) { Meeting.S.mirror = S.mirror; Meeting.attachSelf(); } if ((el.dataset.set === 'camId' || el.dataset.set === 'micId') && Meeting.S) Meeting.getMedia(); toast('Сохранено', 'ok', 1200); }));
     root.querySelectorAll('[data-bgset]').forEach(b => b.addEventListener('click', () => { S.bg = b.dataset.bgset; root.querySelectorAll('[data-bgset]').forEach(x => x.style.borderColor = x === b ? '#8b5cf6' : ''); if (Meeting.S) { Meeting.S.bg = S.bg; Meeting.attachSelf(); Meeting.applyFrameBg(); } toast('Фон сохранён', 'ok', 1200); }));
+    const ap = root.querySelector('[data-act=askPerm]'); ap && ap.addEventListener('click', () => this.requestMedia().then(ok => { if (ok) this.renderSettings(root, tab, compact); }));
     const ct = root.querySelector('[data-act=camTest]'); ct && ct.addEventListener('click', async () => {
       try { const s = await navigator.mediaDevices.getUserMedia({ video: true }); this.modal('Проверка камеры', `<div class="preview-box" id="camPrev"></div>`, [{ label: 'Закрыть', cls: 'btn-gradient', act: 'close' }], m => { const v = document.createElement('video'); v.autoplay = true; v.muted = true; v.playsInline = true; v.srcObject = s; $('#camPrev', m).appendChild(v); if (S.mirror) v.style.transform = 'scaleX(-1)'; }); this.refreshDevices(); const obs = new MutationObserver(() => { if ($('#modalRoot').classList.contains('hidden')) { s.getTracks().forEach(t => t.stop()); obs.disconnect(); } }); obs.observe($('#modalRoot'), { attributes: true }); } catch (e) { toast('Камера недоступна: ' + e.name, 'bad'); }
     });
