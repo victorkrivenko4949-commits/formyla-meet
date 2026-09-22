@@ -151,7 +151,7 @@
             <div class="pmi-id">${App.user.pmi}</div>
             <p class="small muted" style="margin:6px 0 14px">Постоянная комната для ваших занятий. Ссылку можно выдать ученикам один раз.</p>
             <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn-gradient btn-sm" data-h="pmiStart">${icon('video')} Начать</button><button class="btn-ghost btn-sm" data-h="pmiCopy">${icon('copy')} Скопировать ссылку</button></div>
-            <div class="stat-row"><div class="stat"><b>${this.history.length + 12}</b><span>встреч</span></div><div class="stat"><b>${this.recordings.length}</b><span>записей</span></div><div class="stat"><b>${this.contacts.filter(c => c.status === 'online').length}</b><span>в сети</span></div></div>
+            <div class="stat-row"><div class="stat"><b>${this.history.length}</b><span>встреч</span></div><div class="stat"><b>${this.recordings.length}</b><span>записей</span></div><div class="stat"><b>${this.contacts.filter(c => c.status === 'online').length}</b><span>в сети</span></div></div>
           </div>
           <div class="card">
             <div class="section-title">${icon('clock')} Недавние</div>

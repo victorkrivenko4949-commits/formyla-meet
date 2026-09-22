@@ -95,7 +95,7 @@
           </div>
           <div class="prejoin-form">
             <h2>Готовы подключиться?</h2>
-            <p class="muted">${S.isHost ? 'Вы организатор этой встречи. Участники ' + (S.waitingRoom ? 'будут ждать вашего разрешения в зале ожидания.' : 'подключаются сразу.') : 'Организатор: Мария Иванова. Никто больше не подключился — вы первые.'}</p>
+            <p class="muted">${S.isHost ? 'Вы организатор этой встречи. Участники ' + (S.waitingRoom ? 'будут ждать вашего разрешения в зале ожидания.' : 'подключаются сразу.') : 'Никто больше не подключился — вы первые.'}</p>
             <div class="form-stack">
               <div id="permBox"></div>
               <label class="field">Ваше имя<input type="text" id="pjName" value="${esc(S.name)}" maxlength="40"></label>
@@ -168,12 +168,10 @@
     /* =============== КОМНАТА =============== */
     join() {
       const S = this.S; S.joined = true;
-      S.participants = SIM.makeParticipants(5);
-      S.participants[0].host = !S.isHost; S.participants[0].cohost = S.isHost;
+      S.participants = [];
       S.chat.push({ sys: true, text: `Вы подключились к встрече · ${now()}` });
       this.renderRoom();
       this.timers.push(setInterval(() => { S.secs++; const t = $('.room-timer', this.layer); if (t) t.textContent = fmtTime(S.secs); }, 1000));
-      this.startSimulation();
       toast(`Вы в встрече «${S.topic}»`, 'ok');
       if (S.muteOnEntry) S.participants.forEach(p => p.mic = false);
     },
@@ -276,7 +274,7 @@
         <button data-pm="remove" class="danger-text">${icon('userX')} Удалить из встречи</button>`, m => {
         m.querySelectorAll('[data-pm]').forEach(b => b.addEventListener('click', () => {
           const a = b.dataset.pm; this.closePop();
-          if (a === 'mute') { if (p.mic) { p.mic = false; toast(`Микрофон ${p.name} выключен`); } else { toast(`Запрос отправлен: ${p.name} включит микрофон`); setTimeout(() => { p.mic = true; this.renderStage(); this.renderPanel(); }, 2500); } }
+          if (a === 'mute') { if (p.mic) { p.mic = false; toast(`Микрофон ${p.name} выключен`); } else { toast(`Запрос отправлен: ${p.name} может включить микрофон`); } }
           if (a === 'cam') { p.cam = !p.cam; }
           if (a === 'spot') { S.participants.forEach(x => x.spotlight = false); p.spotlight = !p.spotlight; S.spotlight = p.spotlight ? p.id : null; if (p.spotlight) S.view = 'speaker'; }
           if (a === 'chat') { S.chatTo = p.id; S.panel = 'chat'; }
@@ -545,7 +543,7 @@
         <div style="display:grid;gap:10px;font-size:14px">
           <div><span class="muted">Тема</span><br><b>${esc(S.topic)}</b></div>
           <div><span class="muted">Идентификатор</span><br><b style="font-size:22px;letter-spacing:2px">${S.id}</b></div>
-          <div><span class="muted">Организатор</span><br><b>${S.isHost ? esc(S.name) : 'Мария Иванова'}</b></div>
+          <div><span class="muted">Организатор</span><br><b>${S.isHost ? esc(S.name) : 'Организатор встречи'}</b></div>
           <div><span class="muted">Код доступа</span><br><b>${S.pw || 'не требуется'}</b></div>
           <div><span class="muted">Ссылка для приглашения</span><br><code style="word-break:break-all;color:#7dd3fc">${this.inviteLink()}</code></div>
           <div><span class="muted">Шифрование</span><br><span class="tag ok">${icon('shield')} сквозное (E2EE)</span></div>
@@ -756,7 +754,7 @@
       if (a === 'muteAll') { S.participants.forEach(p => p.mic = false); toast('Звук выключен у всех'); }
       if (a === 'lowerAll') { S.participants.forEach(p => p.hand = false); S.hand = false; }
       if (a === 'newPoll') return this.pollModal();
-      if (a === 'quiz') { S.polls.unshift({ q: 'Задача 5: чему равен угол ∠BAC, если ∠BOC = 100°?', opts: ['40°', '50°', '80°', '100°'], votes: [1, 2, 0, 0], my: null, anon: false, open: true }); toast('Викторина запущена', 'ok'); this.simVotes(); }
+      if (a === 'quiz') { S.polls.unshift({ q: 'Задача 5: чему равен угол ∠BAC, если ∠BOC = 100°?', opts: ['40°', '50°', '80°', '100°'], votes: [0, 0, 0, 0], my: null, anon: false, open: true }); toast('Викторина запущена', 'ok'); this.simVotes(); }
       if (a === 'createRooms') return this.roomsModal();
       if (a === 'recreate') return this.roomsModal();
       if (a === 'openRooms') { const open = !S.rooms[0].open; S.rooms.forEach(r => r.open = open); S.chat.push({ sys: true, text: open ? 'Сессионные залы открыты. Участники распределены' : 'Сессионные залы закрыты, все возвращаются в основной зал' }); if (!open) S.participants.forEach(p => p.room = null); toast(open ? 'Залы открыты' : 'Залы закрыты'); }
@@ -777,10 +775,7 @@
         S.chat.push({ sys: true, text: `Организатор запустил опрос: «${q}»` }); toast('Опрос запущен', 'ok'); this.simVotes(); this.renderRoom();
       });
     },
-    simVotes() {
-      const S = this.S, p = S.polls[0];
-      S.participants.forEach((_, i) => setTimeout(() => { if (p.open) { p.votes[rnd(0, p.opts.length - 1)]++; if (S.panel === 'polls') this.renderPanel(); } }, 1500 + i * 1800));
-    },
+    simVotes() { /* голоса приходят только от реальных участников */ },
     roomsModal() {
       const S = this.S;
       App.modal('Сессионные залы', `<div class="field-row"><label class="field">Количество залов<input type="number" id="brN" value="2" min="1" max="10"></label><label class="field">Распределение<select id="brMode"><option value="auto">Автоматически</option><option value="manual">Вручную</option><option value="self">Участники выбирают сами</option></select></label></div>
@@ -801,7 +796,6 @@
         const to = S.chatTo, toP = S.participants.find(p => p.id === to);
         S.chat.push({ from: S.name, me: true, initials: App.user.initials, color: App.user.color, text: t, time: now(), to, toName: toP ? toP.name : '' });
         ta.value = ''; this.renderPanel();
-        if (toP) setTimeout(() => { this.incomingChat(toP, ['Ок, понял', 'Спасибо!', 'Хорошо, сделаю', 'Да, конечно'][rnd(0, 3)], 'me', S.name); }, 2500);
       };
       $('#chatSend', sp).addEventListener('click', send);
       ta && ta.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } });
@@ -826,44 +820,6 @@
       }
       if (e.key === 'Escape') { this.closePop(); this.layer.classList.remove('focus-mode'); if (S.panel) { S.panel = null; this.renderRoom(); } }
       if (e.code === 'Space' && !S.mic && !e.repeat) { S.ptt = true; if (S.stream) S.stream.getAudioTracks().forEach(t => t.enabled = true); toast('Микрофон включён, пока удерживаете пробел'); document.onkeyup = ev => { if (ev.code === 'Space' && S.ptt) { S.ptt = false; if (S.stream) S.stream.getAudioTracks().forEach(t => t.enabled = false); } }; }
-    },
-
-    /* ---------- имитация активности ---------- */
-    startSimulation() {
-      const S = this.S;
-      this.timers.push(setInterval(() => {
-        if (S.ended) return;
-        S.participants.forEach(p => p.speaking = false);
-        const talkers = S.participants.filter(p => p.mic);
-        if (talkers.length && Math.random() < .8) { const p = talkers[rnd(0, talkers.length - 1)]; p.speaking = true; if (S.captions && Math.random() < .5) this.caption(p.name, SIM.captionLines[rnd(0, SIM.captionLines.length - 1)]); }
-        this.layer.querySelectorAll('.tile-v').forEach(t => { const p = S.participants.find(x => x.id === t.dataset.id); if (p) t.classList.toggle('speaking', p.speaking); });
-        if (S.view === 'speaker' && !S.pinned && !S.spotlight && !S.sharing && !S.wbShared) this.renderStage();
-      }, 2600));
-      this.timers.push(setInterval(() => {
-        if (S.ended || !S.participants.length) return;
-        const p = S.participants[rnd(0, S.participants.length - 1)];
-        if (S.allowChat) this.incomingChat(p, SIM.chatLines[rnd(0, SIM.chatLines.length - 1)]);
-      }, 24000));
-      this.timers.push(setInterval(() => { if (S.ended || !S.participants.length) return; const p = S.participants[rnd(0, S.participants.length - 1)]; this.react(p.id, ['👍', '👏', '❤️', '🎉', '😂'][rnd(0, 4)]); }, 17000));
-      this.timers.push(setInterval(() => { if (S.ended || !S.participants.length || Math.random() < .5) return; const p = S.participants[rnd(0, S.participants.length - 1)]; p.hand = !p.hand; if (p.hand) toast(`${p.name} поднял(а) руку`); this.renderStage(); this.renderToolbar(); if (S.panel === 'participants') this.renderPanel(); }, 31000));
-      this.timers.push(setTimeout(() => this.knock(), 15000));
-      this.timers.push(setInterval(() => { if (!S.ended && Math.random() < .5) this.knock(); }, 70000));
-      const typ = setInterval(() => { const t = $('#typing', this.layer); if (t && S.participants.length && Math.random() < .3) { t.textContent = `${S.participants[rnd(0, S.participants.length - 1)].name.split(' ')[0]} печатает…`; setTimeout(() => { if (t) t.textContent = ''; }, 3000); } }, 9000); this.timers.push(typ);
-    },
-    knock() {
-      const S = this.S; if (S.ended || S.locked) return;
-      const used = new Set([...S.participants, ...S.waiting].map(p => p.name)); const name = SIM.waitingNames.find(n => !used.has(n)); if (!name) return;
-      const w = { id: 'w' + Date.now(), name, initials: SIM.initials(name), color: SIM.palette[rnd(0, 7)] };
-      if (!S.waitingRoom) { S.waiting.push(w); this.admit(w.id); return; }
-      S.waiting.push(w); this.renderToolbar(); if (S.panel === 'participants') this.renderPanel();
-      const st = $('#stage', this.layer); if (!st) return;
-      const al = document.createElement('div'); al.className = 'room-alert';
-      al.innerHTML = `<span class="avatar avatar-sm" style="background:${w.color}">${w.initials}</span><span class="p-name">${esc(name)} ждёт в зале ожидания</span>${S.isHost ? `<button class="btn-gradient btn-sm" data-admit="${w.id}">Впустить</button>` : ''}<button class="btn-ghost btn-sm" data-a="panel:participants">Показать</button><button class="btn-icon" data-x>${icon('x')}</button>`;
-      st.appendChild(al);
-      al.querySelector('[data-admit]') && al.querySelector('[data-admit]').addEventListener('click', () => this.admit(w.id));
-      al.querySelector('[data-a]').addEventListener('click', () => { S.panel = 'participants'; this.renderRoom(); });
-      al.querySelector('[data-x]').addEventListener('click', () => al.remove());
-      setTimeout(() => al.remove(), 12000);
     },
 
     /* =============== ВЫХОД =============== */
