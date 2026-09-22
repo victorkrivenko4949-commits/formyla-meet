@@ -6,7 +6,25 @@
   const fmtClock = d => d.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
 
   const App = window.App = {
-    user: { name: 'Алёна', initials: 'АК', color: 'linear-gradient(135deg,#38bdf8,#8b5cf6)', email: 'alena@formyla.net', pmi: '742 019 3385' },
+    user: { name: '', initials: 'Я', color: 'linear-gradient(135deg,#38bdf8,#8b5cf6)', email: '', pmi: '' },
+    /* безопасное хранилище: localStorage может быть недоступен (встроенное окно, приватный режим) */
+    store: {
+      get(k) { try { return JSON.parse(localStorage.getItem('fm_meet_' + k)); } catch (e) { return null; } },
+      set(k, v) { try { localStorage.setItem('fm_meet_' + k, JSON.stringify(v)); } catch (e) { /* без сохранения */ } },
+    },
+    saveUser() { this.store.set('user', { name: this.user.name, pmi: this.user.pmi, color: this.user.color }); this.store.set('settings', { micOn: this.settings.micOn, camOn: this.settings.camOn, mirror: this.settings.mirror, bg: this.settings.bg }); },
+    loadUser() {
+      const u = this.store.get('user') || {};
+      this.user.name = u.name || ''; this.user.initials = SIM.initials(this.user.name) || 'Я';
+      this.user.pmi = u.pmi || genMeetingId(); this.user.color = u.color || SIM.palette[rnd(0, 7)];
+      const st = this.store.get('settings') || {}; Object.keys(st).forEach(k => { if (k in this.settings) this.settings[k] = st[k]; });
+      if (!u.pmi) this.saveUser();
+    },
+    /* ссылка-приглашение: ведёт прямо в предпросмотр встречи */
+    inviteLink(id, pw) { return `${location.origin}${location.pathname}#/join/${String(id).replace(/\D/g, '')}${pw ? '?pw=' + encodeURIComponent(pw) : ''}`; },
+    /* извлечь идентификатор (9–11 цифр) из строки: ссылка, ID с пробелами и т.д. */
+    parseMeetingId(str) { const s = String(str || '').trim(); const m = s.match(/join\/(\d{9,11})/); if (m) return m[1]; const digits = s.replace(/\D/g, ''); return digits.length >= 9 && digits.length <= 11 ? digits : null; },
+    fmtId(d) { d = String(d).replace(/\D/g, ''); return d.length === 9 ? d.replace(/(\d{3})(\d{3})(\d{3})/, '$1 $2 $3') : d.replace(/(\d{3})(\d{4})(\d{3,4})/, '$1 $2 $3'); },
     settings: { micOn: true, camOn: true, mirror: true, bg: 'none', micId: null, camId: null, spkId: null, hd: true, joinAudio: true, muteOnJoin: false, camOffOnJoin: false, notifications: true, theme: 'dark', lang: 'ru', autoRecord: false, recLocal: true, dualMonitor: false, showTimer: true, alwaysCaptions: false, captionSize: 'M', reactionsSkin: 'default', hotkeysGlobal: false },
     devices: { mics: [], cams: [], speakers: [] },
     meetings: SIM.meetings.slice(), recordings: SIM.recordings.slice(), history: [], contacts: SIM.contacts.slice(),
@@ -28,8 +46,9 @@
 
     init() {
       window.addEventListener('hashchange', () => this.route());
+      this.loadUser();
       // Имя пользователя FORMYLA.net (задаётся шаблоном: window.FM_USER = {name, email})
-      if (window.FM_USER && window.FM_USER.name) { this.user.name = window.FM_USER.name; this.user.initials = SIM.initials(window.FM_USER.name); if (window.FM_USER.email) this.user.email = window.FM_USER.email; }
+      if (window.FM_USER && window.FM_USER.name && window.FM_USER.name !== 'Гость') { this.user.name = window.FM_USER.name; this.user.initials = SIM.initials(window.FM_USER.name); if (window.FM_USER.email) this.user.email = window.FM_USER.email; }
       $('#headerNewMeeting').addEventListener('click', () => this.newMeeting());
       this.refreshDevices();
       navigator.mediaDevices && navigator.mediaDevices.addEventListener && navigator.mediaDevices.addEventListener('devicechange', () => this.refreshDevices());
@@ -62,7 +81,7 @@
     /* ---------- действия ---------- */
     newMeeting(opts = {}) {
       this.modal('Новая встреча', `
-        <label class="field">Тема<input type="text" id="nmTopic" value="${esc(opts.topic || 'Быстрая встреча ' + App.user.name)}"></label>
+        <label class="field">Тема<input type="text" id="nmTopic" value="${esc(opts.topic || (App.user.name ? 'Встреча · ' + App.user.name : 'Быстрая встреча'))}"></label>
         <label class="check"><input type="checkbox" id="nmPmi"> Использовать личный идентификатор (${App.user.pmi})</label>
         <label class="check"><input type="checkbox" id="nmVideo" ${App.settings.camOn ? 'checked' : ''}> Начать с включённым видео</label>
         <label class="check"><input type="checkbox" id="nmWaiting" checked> Зал ожидания</label>
@@ -72,20 +91,23 @@
           Meeting.open({ topic: $('#nmTopic').value.trim() || 'Встреча FORMYLA', id: $('#nmPmi').checked ? App.user.pmi : genMeetingId(), host: true, waiting: $('#nmWaiting').checked, pw: $('#nmPw').checked ? String(rnd(1000, 9999)) : '' });
         });
     },
-    joinMeeting(id, topic) {
+    joinMeeting(id, topic, pw) {
       if (!id) return;
       const m = this.meetings.find(x => x.id === id) || null;
-      Meeting.open({ id: m ? m.mid || (m.mid = genMeetingId()) : String(id).replace(/(\d{3})(\d{4})(\d{4})/, '$1 $2 $3'), topic: topic || (m ? m.topic : 'Встреча ' + id), host: !!m, pw: m ? m.pw : '', waiting: m ? m.waiting : true });
+      const digits = m ? (m.mid || (m.mid = genMeetingId())).replace(/\D/g, '') : this.parseMeetingId(id);
+      if (!digits) return toast('Идентификатор должен содержать 9–11 цифр', 'bad');
+      Meeting.open({ id: this.fmtId(digits), topic: topic || (m ? m.topic : 'Встреча ' + digits.slice(0, 3)), host: !!m, pw: m ? m.pw : (pw || ''), waiting: m ? m.waiting : true });
     },
     profileModal() {
       this.modal('Профиль', `
-        <div style="display:flex;align-items:center;gap:16px"><span class="avatar avatar-lg" style="background:${App.user.color}">${App.user.initials}</span><div><b style="font-size:18px">${esc(App.user.name)}</b><br><span class="muted small">${esc(App.user.email)}</span><br><span class="tag violet" style="margin-top:6px">Тариф FORMYLA Pro · без лимита 40 мин</span></div></div>
-        <label class="field">Отображаемое имя<input type="text" id="pfName" value="${esc(App.user.name)}"></label>
+        <div style="display:flex;align-items:center;gap:16px"><span class="avatar avatar-lg" style="background:${App.user.color}">${App.user.initials}</span><div><b style="font-size:18px">${esc(App.user.name || 'Имя не указано')}</b><br><span class="muted small">${esc(App.user.email || 'Имя и настройки хранятся в этом браузере')}</span><br><span class="tag violet" style="margin-top:6px">FORMYLA Meet · без лимита по времени</span></div></div>
+        <label class="field">Отображаемое имя<input type="text" id="pfName" value="${esc(App.user.name)}" placeholder="Как вас будут видеть участники"></label>
         <label class="field">Личный идентификатор встречи (PMI)<input type="text" id="pfPmi" value="${App.user.pmi}"></label>
         <label class="field">Статус<select id="pfStatus"><option>В сети</option><option>Не беспокоить</option><option>Отошёл</option><option>Невидимый</option></select></label>`,
         [{ label: 'Отмена', cls: 'btn-ghost', act: 'close' }, { label: 'Сохранить', cls: 'btn-gradient', act: 'ok' }], null, () => {
-          App.user.name = $('#pfName').value.trim() || App.user.name; App.user.initials = SIM.initials(App.user.name) || 'Я'; App.user.pmi = $('#pfPmi').value.trim() || App.user.pmi;
-          toast('Профиль сохранён', 'ok'); this.route();
+          App.user.name = $('#pfName').value.trim() || App.user.name; App.user.initials = SIM.initials(App.user.name) || 'Я';
+          const pmi = App.parseMeetingId($('#pfPmi').value); if ($('#pfPmi').value.trim() && !pmi) return toast('PMI должен содержать 9–11 цифр', 'bad'); if (pmi) App.user.pmi = App.fmtId(pmi);
+          App.saveUser(); toast('Профиль сохранён', 'ok'); this.route();
         });
     },
 
@@ -117,6 +139,7 @@
     const t = document.createElement('div'); t.className = `toast ${kind}`;
     t.innerHTML = `${icon(kind === 'ok' ? 'check' : kind === 'bad' ? 'info' : 'bell')}<span>${msg}</span>`;
     $('#toasts').appendChild(t); setTimeout(() => { t.style.opacity = '0'; t.style.transition = 'opacity .3s'; setTimeout(() => t.remove(), 300); }, ms);
+    return t;
   };
 
   /* ===== Главная ===== */
@@ -140,7 +163,7 @@
           <div class="card">
             <div class="section-title">${icon('sparkles')} Что умеет FORMYLA Meet</div>
             <div class="cards-grid" style="grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px">
-              ${[['🎥', 'HD-видео до 100 участников', 'галерея и вид докладчика, закрепление и центр внимания'], ['🖥️', 'Демонстрация экрана', 'экран, окно, вкладка, звук компьютера, вторая камера'], ['🧑‍🏫', 'Интерактивная доска', 'фигуры, стикеры, текст, страницы, экспорт PNG'], ['💬', 'Чат и файлы', 'общие и личные сообщения, реакции, эмодзи'], ['🔀', 'Сессионные залы', 'авто- и ручное распределение, сообщения залам'], ['📊', 'Опросы и викторины', 'анонимные опросы, итоги в чат'], ['⏺️', 'Запись', 'локальная запись галереи со звуком'], ['🔒', 'Безопасность', 'зал ожидания, блокировка, коды, E2EE'], ['📝', 'Субтитры', 'распознавание речи на русском'], ['✋', 'Реакции и рука', 'очередь вопросов, невербальная связь']].map(([e, t, d]) => `<div style="padding:12px 14px;border-radius:12px;background:rgba(15,23,42,.6);border:1px solid var(--border-soft)"><div style="font-size:22px">${e}</div><b style="font-size:14px">${t}</b><div class="small muted">${d}</div></div>`).join('')}
+              ${[['🎥', 'HD-видео и звук', 'галерея и вид докладчика, закрепление и центр внимания'], ['🖥️', 'Демонстрация экрана', 'экран, окно, вкладка, звук компьютера, вторая камера'], ['🧑‍🏫', 'Интерактивная доска', 'фигуры, стикеры, текст, страницы, экспорт PNG'], ['💬', 'Чат и файлы', 'общие и личные сообщения, реакции, эмодзи'], ['🔀', 'Сессионные залы', 'авто- и ручное распределение, сообщения залам'], ['📊', 'Опросы и викторины', 'анонимные опросы, итоги в чат'], ['⏺️', 'Запись', 'локальная запись галереи со звуком'], ['🔒', 'Безопасность', 'зал ожидания, блокировка, коды доступа, шифрование WebRTC'], ['📝', 'Субтитры', 'распознавание речи на русском'], ['✋', 'Реакции и рука', 'очередь вопросов, невербальная связь']].map(([e, t, d]) => `<div style="padding:12px 14px;border-radius:12px;background:rgba(15,23,42,.6);border:1px solid var(--border-soft)"><div style="font-size:22px">${e}</div><b style="font-size:14px">${t}</b><div class="small muted">${d}</div></div>`).join('')}
             </div>
           </div>
         </div>
@@ -168,27 +191,39 @@
     if (a === 'join') this.joinModal();
     if (a === 'schedule') location.hash = '#/meetings/new';
     if (a === 'share') { App.settings.camOn = false; Meeting.open({ topic: 'Демонстрация экрана', host: true, waiting: false }); }
-    if (a === 'pmiStart') Meeting.open({ topic: `Комната ${App.user.name}`, id: App.user.pmi, host: true });
-    if (a === 'pmiCopy') { const link = `${location.origin}${location.pathname}#/join/${App.user.pmi.replace(/\s/g, '')}`; navigator.clipboard ? navigator.clipboard.writeText(link).then(() => toast('Ссылка скопирована', 'ok')).catch(() => toast(link)) : toast(link); }
+    if (a === 'pmiStart') Meeting.open({ topic: App.user.name ? `Комната · ${App.user.name}` : 'Личная комната', id: App.user.pmi, host: true });
+    if (a === 'pmiCopy') { const link = App.inviteLink(App.user.pmi); navigator.clipboard ? navigator.clipboard.writeText(link).then(() => toast('Ссылка скопирована', 'ok')).catch(() => toast(link)) : toast(link); }
   };
   App.joinModal = function (prefill = '') {
     this.modal('Подключиться к встрече', `
       <label class="field">Идентификатор встречи или ссылка<input type="text" id="jmId" value="${esc(prefill)}" placeholder="Например: 742 019 3385" inputmode="numeric"></label>
-      <label class="field">Ваше имя<input type="text" id="jmName" value="${esc(App.user.name)}"></label>
+      <label class="field">Ваше имя<input type="text" id="jmName" value="${esc(App.user.name)}" placeholder="Как вас будут видеть участники"></label>
       <label class="check"><input type="checkbox" id="jmMic" ${App.settings.muteOnJoin ? 'checked' : ''}> Не подключать звук</label>
       <label class="check"><input type="checkbox" id="jmCam" ${App.settings.camOffOnJoin ? 'checked' : ''}> Выключить видео</label>
       <p class="small muted">Недавние: ${this.meetings.slice(0, 2).map(m => `<a href="#" data-recent="${m.id}" style="color:#7dd3fc">${esc(m.topic.slice(0, 40))}</a>`).join(' · ')}</p>`,
       [{ label: 'Отмена', cls: 'btn-ghost', act: 'close' }, { label: 'Подключиться', cls: 'btn-gradient', act: 'ok' }], m => {
         m.querySelectorAll('[data-recent]').forEach(a => a.addEventListener('click', e => { e.preventDefault(); $('#jmId').value = a.dataset.recent; }));
       }, () => {
-        let id = $('#jmId').value.trim(); if (!id) { toast('Введите идентификатор', 'bad'); return false; }
-        const mm = id.match(/join\/(\d{9,11})/); if (mm) id = mm[1];
-        App.user.name = $('#jmName').value.trim() || App.user.name; App.user.initials = SIM.initials(App.user.name) || 'Я';
+        const raw = $('#jmId').value.trim(); if (!raw) { toast('Введите идентификатор или ссылку', 'bad'); return false; }
+        App.user.name = $('#jmName').value.trim() || App.user.name; App.user.initials = SIM.initials(App.user.name) || 'Я'; App.saveUser();
         App.settings.micOn = !$('#jmMic').checked; App.settings.camOn = !$('#jmCam').checked;
-        if (this.meetings.find(x => x.id === id)) this.joinMeeting(id); else { const digits = id.replace(/\D/g, ''); if (digits.length < 9) { toast('Идентификатор должен содержать 9–11 цифр', 'bad'); return false; } Meeting.open({ id: digits.replace(/(\d{3})(\d{4})(\d{3,4})/, '$1 $2 $3'), topic: 'Встреча ' + digits.slice(0, 3), host: false, waiting: true }); }
+        if (this.meetings.find(x => x.id === raw)) return this.joinMeeting(raw);
+        const digits = this.parseMeetingId(raw); if (!digits) { toast('Идентификатор должен содержать 9–11 цифр. Можно вставить ссылку-приглашение целиком', 'bad', 5000); return false; }
+        const pwm = raw.match(/[?&]pw=([^&\s]+)/);
+        Meeting.open({ id: this.fmtId(digits), topic: 'Встреча ' + digits.slice(0, 3), host: false, waiting: true, pw: pwm ? decodeURIComponent(pwm[1]) : '' });
       });
   };
-  App.routes.join = function (arg) { this.routes.home.call(this); if (arg) this.joinModal(arg); else this.joinModal(); };
+  App.routes.join = function (arg) {
+    this.routes.home.call(this);
+    if (!arg) return this.joinModal();
+    // ссылка-приглашение #/join/<id>?pw=<код> — сразу в предпросмотр той же встречи
+    const [idPart, query = ''] = String(arg).split('?');
+    const digits = this.parseMeetingId(idPart);
+    if (!digits) { toast('Некорректная ссылка на встречу', 'bad'); return this.joinModal(idPart); }
+    const pwm = query.match(/(?:^|&)pw=([^&]+)/);
+    if (document.body.classList.contains('in-meeting') && Meeting.S && Meeting.S.id.replace(/\D/g, '') === digits) return;
+    Meeting.open({ id: this.fmtId(digits), topic: 'Встреча ' + digits.slice(0, 3), host: false, waiting: true, pw: pwm ? decodeURIComponent(pwm[1]) : '' });
+  };
 
   App.meetingRow = function (m) {
     const past = m.when < new Date();
@@ -200,7 +235,7 @@
   App.bindMeetingRows = function () {
     const r = $('#app');
     r.querySelectorAll('[data-start]').forEach(b => b.addEventListener('click', () => this.joinMeeting(b.dataset.start)));
-    r.querySelectorAll('[data-copy]').forEach(b => b.addEventListener('click', () => { const m = this.meetings.find(x => x.id === b.dataset.copy); const t = `${m.host} приглашает вас на встречу FORMYLA Meet\nТема: ${m.topic}\nВремя: ${fmtDate(m.when)} ${fmtClock(m.when)}\nСсылка: ${location.origin}${location.pathname}#/join/${(m.mid || (m.mid = genMeetingId())).replace(/\s/g, '')}${m.pw ? '\nКод доступа: ' + m.pw : ''}`; navigator.clipboard ? navigator.clipboard.writeText(t).then(() => toast('Приглашение скопировано', 'ok')).catch(() => toast('Не удалось скопировать', 'bad')) : toast('Буфер обмена недоступен', 'bad'); }));
+    r.querySelectorAll('[data-copy]').forEach(b => b.addEventListener('click', () => { const m = this.meetings.find(x => x.id === b.dataset.copy); const t = `${m.host || 'Организатор'} приглашает вас на встречу FORMYLA Meet\nТема: ${m.topic}\nВремя: ${fmtDate(m.when)} ${fmtClock(m.when)}\nСсылка: ${App.inviteLink(m.mid || (m.mid = genMeetingId()), m.pw)}${m.pw ? '\nКод доступа: ' + m.pw : ''}`; navigator.clipboard ? navigator.clipboard.writeText(t).then(() => toast('Приглашение скопировано', 'ok')).catch(() => toast('Не удалось скопировать', 'bad')) : toast('Буфер обмена недоступен', 'bad'); }));
     r.querySelectorAll('[data-edit]').forEach(b => b.addEventListener('click', () => this.scheduleForm(this.meetings.find(x => x.id === b.dataset.edit))));
     r.querySelectorAll('[data-del]').forEach(b => b.addEventListener('click', () => { const m = this.meetings.find(x => x.id === b.dataset.del); this.modal('Удалить встречу?', `<p>«${esc(m.topic)}» будет удалена из расписания. Участники получат уведомление об отмене.</p>`, [{ label: 'Отмена', cls: 'btn-ghost', act: 'close' }, { label: 'Удалить', cls: 'btn-danger', act: 'ok' }], null, () => { this.meetings = this.meetings.filter(x => x !== m); toast('Встреча удалена'); this.route(); }); }));
   };
@@ -212,7 +247,7 @@
     let body = '';
     if (tab === 'upcoming') body = `<div class="meeting-list">${up.length ? up.map(m => this.meetingRow(m)).join('') : `<div class="empty">${icon('calendar')}Нет запланированных встреч</div>`}</div>`;
     if (tab === 'past') body = `<div class="meeting-list">${this.history.length ? this.history.map(h => `<div class="meeting-item"><div class="meeting-time"><b>${fmtClock(h.date)}</b><span>${h.date.toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' })}</span></div><div class="meeting-body"><h4>${esc(h.topic)}</h4><p>${h.dur} · ${h.participants} участник(ов)</p></div><div class="meeting-actions"><button class="btn-ghost btn-sm" data-again="${esc(h.topic)}">Повторить</button></div></div>`).join('') : `<div class="empty">${icon('clock')}Завершённых встреч в этой сессии пока нет</div>`}</div>`;
-    if (tab === 'pmi') body = `<div class="card" style="max-width:640px"><div class="pmi-id" style="font-size:34px;font-weight:900;letter-spacing:2px">${App.user.pmi}</div><p class="muted" style="margin:8px 0 16px">Личная комната всегда доступна по одной ссылке: <code style="color:#7dd3fc">${location.origin}${location.pathname}#/join/${App.user.pmi.replace(/\s/g, '')}</code></p>
+    if (tab === 'pmi') body = `<div class="card" style="max-width:640px"><div class="pmi-id" style="font-size:34px;font-weight:900;letter-spacing:2px">${App.user.pmi}</div><p class="muted" style="margin:8px 0 16px">Личная комната всегда доступна по одной ссылке: <code style="color:#7dd3fc">${App.inviteLink(App.user.pmi)}</code></p>
       <div class="setting-row"><div><div class="setting-title">Зал ожидания</div><div class="setting-desc">Участники ждут разрешения организатора</div></div><label class="switch"><input type="checkbox" checked><span class="track"></span></label></div>
       <div class="setting-row"><div><div class="setting-title">Код доступа</div><div class="setting-desc">Требовать код для входа в личную комнату</div></div><label class="switch"><input type="checkbox"><span class="track"></span></label></div>
       <div class="setting-row"><div><div class="setting-title">Разрешить вход до организатора</div><div class="setting-desc">Ученики могут начать без вас</div></div><label class="switch"><input type="checkbox"><span class="track"></span></label></div>
@@ -225,7 +260,7 @@
     if (tab === 'new') this.scheduleForm(null, $('#meetBody'));
     this.bindMeetingRows();
     $('#app').querySelectorAll('[data-again]').forEach(b => b.addEventListener('click', () => Meeting.open({ topic: b.dataset.again, host: true })));
-    const p2 = $('#pmiStart2'); p2 && p2.addEventListener('click', () => Meeting.open({ topic: `Комната ${App.user.name}`, id: App.user.pmi, host: true }));
+    const p2 = $('#pmiStart2'); p2 && p2.addEventListener('click', () => Meeting.open({ topic: App.user.name ? `Комната · ${App.user.name}` : 'Личная комната', id: App.user.pmi, host: true }));
   };
   App.scheduleForm = function (m, inline) {
     const d = m ? m.when : new Date(Date.now() + 3600e3); d.setMinutes(Math.ceil(d.getMinutes() / 15) * 15, 0, 0);
@@ -254,7 +289,7 @@
     const save = () => {
       const topic = $('#scTopic').value.trim(); if (!topic) { toast('Введите тему', 'bad'); return false; }
       const when = new Date(`${$('#scDate').value}T${$('#scTime').value || '12:00'}`); if (isNaN(when)) { toast('Проверьте дату и время', 'bad'); return false; }
-      const data = { topic, desc: $('#scDesc').value, when, dur: +$('#scDur').value, recurring: $('#scRec').value || null, pw: $('#scPw').value.trim(), waiting: $('#scWait').checked, record: $('#scRecord').checked, host: App.user.name };
+      const data = { topic, desc: $('#scDesc').value, when, dur: +$('#scDur').value, recurring: $('#scRec').value || null, pw: $('#scPw').value.trim(), waiting: $('#scWait').checked, record: $('#scRecord').checked, host: App.user.name || 'Организатор' };
       if (m) Object.assign(m, data); else this.meetings.push({ id: 'm' + Date.now(), mid: $('#scId').value === 'pmi' ? App.user.pmi : genMeetingId(), ...data });
       toast(m ? 'Встреча обновлена' : 'Встреча запланирована. Приглашение готово к отправке', 'ok');
       if ($('#scCal').checked) { const ics = this.makeIcs(data); const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([ics], { type: 'text/calendar' })); a.download = 'formyla-meet.ics'; a.click(); }

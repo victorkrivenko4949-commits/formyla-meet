@@ -87,7 +87,7 @@ meet_css += '#fm {\n' + reset + '\n' + '\n'.join(n1 + n2) + '\n}\n\n'
 meet_css += '/* Правила уровня body */\n' + '\n'.join(g1 + g2) + '\n'
 (OUT / 'static' / 'meet' / 'meet.css').write_text(meet_css)
 
-for js in ['icons.js', 'whiteboard.js', 'sim.js', 'meeting.js', 'app.js']:
+for js in ['icons.js', 'whiteboard.js', 'sim.js', 'rtc.js', 'meeting.js', 'app.js']:
     shutil.copy(ROOT / js, OUT / 'static' / 'meet' / js)
 
 # ---------- шаблон ----------
@@ -118,10 +118,13 @@ template = '''{% extends "base.html" %}
     name: {{ ((current_user.nickname or current_user.name or 'Гость') if current_user.is_authenticated else 'Гость') | tojson }},
     email: {{ (current_user.email if current_user.is_authenticated and current_user.email else '') | tojson }}
   };
+  // Сервер встреч (сигналинг WebSocket). Если поднимете свой — замените адрес.
+  window.FM_SIGNAL_URL = 'wss://formyla-meet-signal.onrender.com/ws';
 </script>
 <script src="{{ url_for('static', filename='meet/icons.js') }}?v={{ asset_version }}"></script>
 <script src="{{ url_for('static', filename='meet/whiteboard.js') }}?v={{ asset_version }}"></script>
 <script src="{{ url_for('static', filename='meet/sim.js') }}?v={{ asset_version }}"></script>
+<script src="{{ url_for('static', filename='meet/rtc.js') }}?v={{ asset_version }}"></script>
 <script src="{{ url_for('static', filename='meet/meeting.js') }}?v={{ asset_version }}"></script>
 <script src="{{ url_for('static', filename='meet/app.js') }}?v={{ asset_version }}"></script>
 {% endblock %}
@@ -158,7 +161,8 @@ def meet_page():
 |---|---|
 | `templates/meet.html` | `templates/meet.html` (новый файл, наследует `base.html`) |
 | `static/meet/meet.css` | `static/meet/meet.css` |
-| `static/meet/icons.js`, `whiteboard.js`, `sim.js`, `meeting.js`, `app.js` | `static/meet/` |
+| `static/meet/icons.js`, `whiteboard.js`, `sim.js`, `rtc.js`, `meeting.js`, `app.js` | `static/meet/` |
+| `server/server.js`, `server/package.json` | отдельный сервис встреч (Node.js), см. ниже — на сайт копировать не нужно |
 | `SNIPPET_app_py.txt` | маршрут `/meet` — вставить в `app.py` после `misc_page()` |
 | `SNIPPET_misc_html.txt` | строка раздела — вставить в `templates/misc.html`, группа «🛠️ Инструменты» |
 
@@ -178,9 +182,17 @@ def meet_page():
 - Все стили вложены в `#fm { … }` (CSS Nesting, Chrome 120+, Safari 17.2+, Firefox 117+) и не трогают остальной сайт;
   глобальный `button { background: gradient; color: #fff !important }` сайта внутри раздела сброшен.
 - Комната встречи открывается поверх всей страницы (`z-index: 5000`) и скрывает шапку, пока идёт встреча.
-- Участники, их сообщения и реакции пока симулируются. Для настоящих звонков нужно подключить сигналинг —
-  в проекте уже есть `/api/wb_call/*` и `static/js/wb_signalling.js` (используются страницами `/call` и `/conference`).
-- Записи и настройки хранятся в памяти страницы (без localStorage); при перезагрузке очищаются.
+- Встречи настоящие: сигналинг идёт через WebSocket-сервер `server/server.js`, звук и видео — напрямую между
+  браузерами (WebRTC, P2P-сетка). Сервер уже развёрнут на Render: `wss://formyla-meet-signal.onrender.com/ws`
+  (адрес задаётся в `templates/meet.html` через `window.FM_SIGNAL_URL`). Бесплатный тариф Render «засыпает»
+  без трафика: первое подключение может занять 30–60 секунд, пользователю показывается уведомление.
+- Чтобы поднять свой сервер: `cd server && npm install && node server.js` (порт из `PORT`, по умолчанию 8787),
+  проверка `GET /healthz`. На Render: Web Service, Node, build `npm install`, start `node server.js`.
+- P2P-сетка подходит для небольших групп (до 6–8 участников с видео). Для больших вебинаров нужен SFU
+  (например, LiveKit или mediasoup) — это отдельная задача.
+- Пользователи анонимны: имя вводится на экране подготовки и запоминается в браузере; если пользователь
+  вошёл на FORMYLA.net, подставляется его имя из `window.FM_USER`.
+- Записи хранятся в памяти страницы до перезагрузки; имя, PMI и настройки устройств — в localStorage браузера (`fm_meet_*`).
 
 ## Промпт для Roo
 
@@ -190,10 +202,14 @@ def meet_page():
 2. В app.py сразу после функции misc_page() добавь маршрут из SNIPPET_app_py.txt (GET /meet → render_template('meet.html')).
 3. В templates/misc.html в группу «🛠️ Инструменты» после строки с «💡 Банк неточностей» вставь .misc-row из SNIPPET_misc_html.txt.
 4. Ничего больше не меняй: base.html, nav.js, стили сайта и другие шаблоны не трогать.
-5. Перед коммитом покажи список добавленных и изменённых файлов (только 8 файлов: 6 в static/meet, templates/meet.html, app.py, templates/misc.html — итого 9 путей). Убедись, что в коммит не попали .env, дампы и логи.
+5. Перед коммитом покажи список добавленных и изменённых файлов (только: 7 файлов в static/meet, templates/meet.html, app.py, templates/misc.html — итого 10 путей; папку server/ на сайт не копировать). Убедись, что в коммит не попали .env, дампы и логи.
 6. Проверь: flask запускается, GET /meet возвращает 200, на /misc есть ссылка «🎥 Видеовстречи», в консоли браузера на /meet нет ошибок.
 ```
 ''')
+
+(OUT / 'server').mkdir(exist_ok=True)
+shutil.copy(ROOT / 'server.js', OUT / 'server' / 'server.js')
+shutil.copy(ROOT / 'package.json', OUT / 'server' / 'package.json')
 
 with zipfile.ZipFile(ROOT / 'formyla_meet_package.zip', 'w', zipfile.ZIP_DEFLATED) as z:
     for p in OUT.rglob('*'):

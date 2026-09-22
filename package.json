@@ -1,0 +1,9 @@
+{
+  "name": "formyla-meet",
+  "version": "2.0.0",
+  "description": "FORMYLA Meet — видеовстречи: статика и сервер сигнализации WebRTC",
+  "main": "server.js",
+  "scripts": { "start": "node server.js" },
+  "engines": { "node": ">=18" },
+  "dependencies": { "ws": "^8.18.0" }
+}

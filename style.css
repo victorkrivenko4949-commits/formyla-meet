@@ -548,7 +548,7 @@ body.in-meeting .toasts { bottom: 100px; right: auto; left: 50%; transform: tran
 .wb-collab { display: flex; align-items: center; gap: 6px; }
 .wb-collab .avatar { width: 26px; height: 26px; font-size: 10px; border: 2px solid #fff; margin-left: -8px; }
 .wb-collab .avatar:first-child { margin-left: 0; }
-.wb-cursor { position: absolute; z-index: 4; pointer-events: none; transition: left .3s, top .3s; }
+.wb-cursor { position: absolute; z-index: 4; pointer-events: none; transition: left .1s linear, top .1s linear, opacity .4s; }
 .wb-cursor svg { width: 16px; height: 16px; }
 .wb-cursor span { position: absolute; left: 14px; top: 12px; padding: 2px 6px; border-radius: 6px; color: #fff; font-size: 11px; font-weight: 700; white-space: nowrap; }
 .wb-laser-dot { position: absolute; width: 14px; height: 14px; border-radius: 50%; background: #ef4444; box-shadow: 0 0 12px 4px rgba(239,68,68,.55); pointer-events: none; transform: translate(-50%,-50%); z-index: 6; }
@@ -643,3 +643,10 @@ body.in-meeting .toasts { bottom: 100px; right: auto; left: 50%; transform: tran
 .wb-annot .wb-canvas-wrap, .wb-annot .wb-canvas-wrap.clear { background: transparent; background-image: none; }
 .wb-annot .wb-bottom { display: none; }
 .wb-annot .wb-menu { color: #0f172a; }
+
+/* зал ожидания и удалённое видео */
+.waiting-spinner { width: 54px; height: 54px; margin: 0 auto; border-radius: 50%; border: 4px solid rgba(139,92,246,.25); border-top-color: #8b5cf6; animation: fmspin 1s linear infinite; }
+@keyframes fmspin { to { transform: rotate(360deg); } }
+.tile-v [data-remote-video] video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; background: #000; }
+.share-main > video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; background: #000; }
+.chat-msg .text a.file { display: inline-flex; align-items: center; gap: 6px; }

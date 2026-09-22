@@ -194,7 +194,7 @@
         <hr>
         <button data-m="shortcuts">${icon('keyboard')} Горячие клавиши</button>`;
       this.root.querySelector('.wb-top').appendChild(m);
-      m.querySelectorAll('[data-bg]').forEach(b => b.addEventListener('click', () => { this.bg = b.dataset.bg; this.setTool(this.tool); m.remove(); }));
+      m.querySelectorAll('[data-bg]').forEach(b => b.addEventListener('click', () => { this.bg = b.dataset.bg; this.setTool(this.tool); m.remove(); this.commit(); }));
       m.querySelector('input[type=file]').addEventListener('change', ev => this.importJson(ev.target.files[0]));
       m.querySelectorAll('[data-m]').forEach(b => b.addEventListener('click', () => { this.menuAction(b.dataset.m); m.remove(); }));
       const off = ev => { if (!m.contains(ev.target) && !ev.target.closest('[data-act=menu]')) { m.remove(); document.removeEventListener('pointerdown', off); } };
@@ -208,6 +208,7 @@
       if (a === 'exportJson') this.exportJson();
       if (a === 'shortcuts') window.toast && toast('V — выделение, P — перо, H — маркер, L — линия, A — стрелка, R — прямоугольник, O — эллипс, T — текст, N — стикер, E — ластик, Ctrl+Z / Ctrl+Y — отмена/повтор, Ctrl+колесо — масштаб, двойной клик — текст', 'ok', 9000);
       this.renderPages(); this.render();
+      if (a === 'addPage' || a === 'dupPage' || a === 'delPage') this.commit();
     }
     renderPages() {
       const el = this.root.querySelector('.wb-pages');
@@ -218,7 +219,7 @@
     }
     renderCollab() {
       const el = this.root.querySelector('.wb-collab');
-      if (!this.collab.length) { el.innerHTML = `<span class="small" style="color:#64748b">Личная доска · изменения сохраняются в сессии</span>`; return; }
+      if (!this.collab.length) { el.innerHTML = `<span class="small" style="color:#64748b">${this.opts.onChange ? 'Общая доска · пока вы одни' : 'Личная доска · изменения сохраняются в сессии'}</span>`; return; }
       el.innerHTML = this.collab.map(c => `<span class="avatar" style="background:${c.color}" title="${c.name}">${c.initials}</span>`).join('') + `<span style="margin-left:8px;font-weight:700">${this.collab.length + 1} на доске</span>`;
     }
 
@@ -239,6 +240,11 @@
       const dpr = window.devicePixelRatio || 1;
       this.canvas.width = rect.width * dpr; this.canvas.height = rect.height * dpr;
       this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      if (this.opts.fitSpace) {
+        // общая система координат для всех участников (например, 1600×900 поверх демонстрации экрана)
+        const [W, H] = this.opts.fitSpace; this.zoom = Math.min(rect.width / W, rect.height / H);
+        this.panX = (rect.width - W * this.zoom) / 2; this.panY = (rect.height - H * this.zoom) / 2; this.updateZoomLabel && this.updateZoomLabel();
+      }
       this.render();
     }
 
@@ -264,6 +270,7 @@
     move(e) {
       if (this.panning) { this.panX = this.panning.px + (e.offsetX - this.panning.x); this.panY = this.panning.py + (e.offsetY - this.panning.y); this.render(); return; }
       const p = this.toWorld(e.offsetX, e.offsetY);
+      if (this.opts.onCursor) { const t = Date.now(); if (!this._curT || t - this._curT > 90) { this._curT = t; this.opts.onCursor(p); } else { clearTimeout(this._curTm); this._curTm = setTimeout(() => { this._curT = Date.now(); this.opts.onCursor(p); }, 100); } }
       if (this.tool === 'laser') { if (this.laserOn || true) this.showLaser(e.offsetX, e.offsetY); return; }
       if (this.erasing) { this.eraseAt(p); return; }
       if (this.dragging && this.selected) {
@@ -458,7 +465,7 @@
           const d = JSON.parse(r.result);
           this.pages = d.pages.map(p => ({ shapes: p.shapes, undo: [], redo: [] })); this.page = 0;
           this.title = d.title || this.title; const ti = this.root.querySelector('.wb-title input'); if (ti) ti.value = this.title;
-          this.bg = d.bg || this.bg; this.setTool(this.tool); this.renderPages(); this.render();
+          this.bg = d.bg || this.bg; this.setTool(this.tool); this.renderPages(); this.render(); this.commit();
           window.toast && toast('Доска загружена', 'ok');
         } catch (e) { window.toast && toast('Не удалось прочитать файл доски', 'bad'); }
       };
@@ -466,18 +473,16 @@
     }
     snapshot() { return this.canvas.toDataURL('image/png'); }
 
-    /* ---------- имитация курсоров участников ---------- */
-    startCollabCursors() {
-      this.cursorsEl.innerHTML = this.collab.map((c, i) => `<div class="wb-cursor" data-i="${i}" style="left:${100 + i * 120}px;top:${120 + i * 60}px">${icon('cursor').replace('fill="none"', `fill="${c.color}"`).replace('stroke="currentColor"', `stroke="#fff"`)}<span style="background:${c.color}">${c.name}</span></div>`).join('');
-      this.collabTimer = setInterval(() => {
-        const rect = this.wrap.getBoundingClientRect();
-        this.cursorsEl.querySelectorAll('.wb-cursor').forEach(el => {
-          if (Math.random() < .5) return;
-          el.style.left = 40 + Math.random() * Math.max(100, rect.width - 160) + 'px';
-          el.style.top = 40 + Math.random() * Math.max(100, rect.height - 120) + 'px';
-        });
-      }, 1800);
+    /* ---------- курсоры других участников (реальные позиции, приходят с сервера) ---------- */
+    startCollabCursors() { this.cursorsEl.innerHTML = ''; }
+    setCursor(id, name, color, wx, wy) {
+      if (!this.cursorsEl) return;
+      let el = this.cursorsEl.querySelector(`.wb-cursor[data-id="${id}"]`);
+      if (!el) { el = document.createElement('div'); el.className = 'wb-cursor'; el.dataset.id = id; el.innerHTML = `${icon('cursor').replace('fill="none"', `fill="${color}"`).replace('stroke="currentColor"', `stroke="#fff"`)}<span style="background:${color}">${name}</span>`; this.cursorsEl.appendChild(el); }
+      el.style.left = (wx * this.zoom + this.panX) + 'px'; el.style.top = (wy * this.zoom + this.panY) + 'px'; el.style.opacity = '1';
+      clearTimeout(el._hide); el._hide = setTimeout(() => { el.style.opacity = '0'; }, 4000);
     }
+    removeCursor(id) { const el = this.cursorsEl && this.cursorsEl.querySelector(`.wb-cursor[data-id="${id}"]`); el && el.remove(); }
   }
   window.Whiteboard = Whiteboard;
 })();

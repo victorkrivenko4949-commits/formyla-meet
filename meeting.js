@@ -23,7 +23,9 @@
         participants: [], waiting: [], chat: [], polls: [], rooms: [], chatTo: 'all', unread: 0,
         bg: App.settings.bg || 'none', mirror: App.settings.mirror !== false, hd: true, noise: true,
         stream: null, displayStream: null, recorder: null, recChunks: [], wb: null, activePop: null, ended: false,
+        me: null, connecting: false, waitingScreen: false, cohost: false, wbRemote: false,
       };
+      this.remoteVideos = {}; this.audioSink = this.audioSink || (() => { const d = document.createElement('div'); d.id = 'audioSink'; d.style.display = 'none'; document.body.appendChild(d); return d; })();
       this.renderPrejoin();
       await this.getMedia();
     },
@@ -33,14 +35,17 @@
       try {
         if (S.stream) S.stream.getTracks().forEach(t => t.stop());
         const constraints = { video: S.cam ? { width: { ideal: S.hd ? 1280 : 640 }, height: { ideal: S.hd ? 720 : 360 }, deviceId: App.settings.camId ? { exact: App.settings.camId } : undefined } : false, audio: S.mic || !S.joined ? { echoCancellation: true, noiseSuppression: S.noise, deviceId: App.settings.micId ? { exact: App.settings.micId } : undefined } : false };
-        if (!constraints.video && !constraints.audio) { S.stream = null; this.attachSelf(); return; }
+        if (!constraints.video && !constraints.audio) { S.stream = null; this.attachSelf(); RTC.setLocalStream(null); return; }
         S.stream = await navigator.mediaDevices.getUserMedia(constraints);
+        S.stream.getAudioTracks().forEach(t => t.enabled = S.mic);
         S.mediaError = null; S.permState = 'granted';
+        RTC.setLocalStream(S.stream);
         this.attachSelf(); this.renderPermBox();
         this.startLevelMeter();
         App.refreshDevices && App.refreshDevices();
       } catch (e) {
         S.stream = null; S.mediaError = e.name; S.permState = (e.name === 'NotAllowedError' || e.name === 'SecurityError') ? 'denied' : 'error';
+        RTC.setLocalStream(null);
         this.attachSelf(); this.renderPermBox();
         if (e.name === 'NotFoundError') toast('Камера или микрофон не найдены', 'bad');
       }
@@ -96,11 +101,11 @@
           </div>
           <div class="prejoin-form">
             <h2>Готовы подключиться?</h2>
-            <p class="muted">${S.isHost ? 'Вы организатор этой встречи. Участники ' + (S.waitingRoom ? 'будут ждать вашего разрешения в зале ожидания.' : 'подключаются сразу.') : 'Никто больше не подключился — вы первые.'}</p>
+            <p class="muted">${S.isHost ? 'Вы организатор этой встречи. Участники ' + (S.waitingRoom ? 'будут ждать вашего разрешения в зале ожидания.' : 'подключаются сразу.') : 'Введите имя и нажмите «Подключиться». Если у встречи включён зал ожидания, организатор впустит вас.'}</p>
             <div class="form-stack">
               <div id="permBox"></div>
-              <label class="field">Ваше имя<input type="text" id="pjName" value="${esc(S.name)}" maxlength="40"></label>
-              ${S.pw && !S.isHost ? `<label class="field">Код доступа<input type="password" id="pjPw" placeholder="Введите код"></label>` : ''}
+              <label class="field">Ваше имя<input type="text" id="pjName" value="${esc(S.name)}" maxlength="40" placeholder="Как вас будут видеть участники" autocomplete="name"></label>
+              ${!S.isHost ? `<label class="field">Код доступа <span class="muted small">(если организатор его задал)</span><input type="text" id="pjPw" value="${esc(S.pw)}" placeholder="Введите код" inputmode="numeric" autocomplete="off"></label>` : ''}
               <div><div class="small muted" style="margin-bottom:6px">Уровень микрофона</div><div class="level-meter"><i></i></div></div>
               <label class="check"><input type="checkbox" id="pjRemember" checked> Запомнить настройки микрофона и камеры</label>
               <label class="check"><input type="checkbox" id="pjAudio" checked> Подключиться со звуком компьютера</label>
@@ -159,22 +164,173 @@
       if (a === 'copy') this.copyInvite();
       if (a === 'join') {
         const n = $('#pjName').value.trim(); if (!n) return toast('Введите имя', 'bad');
-        const pw = $('#pjPw'); if (pw && S.pw && pw.value !== S.pw) return toast('Неверный код доступа', 'bad');
-        S.name = n; App.user.name = n; App.user.initials = SIM.initials(n) || 'Я';
+        const pw = $('#pjPw'); if (pw) S.pw = pw.value.trim();
+        S.name = n; App.user.name = n; App.user.initials = SIM.initials(n) || 'Я'; App.saveUser && App.saveUser();
         if ($('#pjRemember').checked) { App.settings.micOn = S.mic; App.settings.camOn = S.cam; }
         this.join();
       }
     },
 
     /* =============== КОМНАТА =============== */
-    join() {
-      const S = this.S; S.joined = true;
-      S.participants = [];
-      S.chat.push({ sys: true, text: `Вы подключились к встрече · ${now()}` });
-      this.renderRoom();
-      this.timers.push(setInterval(() => { S.secs++; const t = $('.room-timer', this.layer); if (t) t.textContent = fmtTime(S.secs); }, 1000));
-      toast(`Вы в встрече «${S.topic}»`, 'ok');
-      if (S.muteOnEntry) S.participants.forEach(p => p.mic = false);
+    async join() {
+      const S = this.S; if (S.connecting) return;
+      S.connecting = true; S.participants = [];
+      const btn = $('[data-a="join"]', this.layer); if (btn) { btn.disabled = true; btn.textContent = 'Подключение…'; }
+      this.bindServer();
+      let waitToast = null; const waitTm = setTimeout(() => { waitToast = toast('Подключаемся к серверу встреч… Первое подключение может занять до минуты', 'info', 60000); }, 900);
+      try {
+        await RTC.connect();
+        clearTimeout(waitTm); if (waitToast) waitToast.remove();
+      } catch (e) {
+        clearTimeout(waitTm); if (waitToast) waitToast.remove();
+        S.connecting = false; if (btn) { btn.disabled = false; btn.textContent = S.isHost ? 'Начать встречу' : 'Подключиться'; }
+        return toast(e.message === 'timeout' ? 'Сервер встреч не ответил. Попробуйте ещё раз через полминуты' : 'Не удалось подключиться к серверу встреч. Проверьте интернет и попробуйте снова', 'bad', 7000);
+      }
+      RTC.setLocalStream(S.stream);
+      RTC.send({ t: 'join', room: S.id, create: !!S.isHost, name: S.name, pw: S.pw, topic: S.topic, waiting: S.waitingRoom, mic: S.mic && !!(S.stream && S.stream.getAudioTracks().length), cam: S.cam && !!(S.stream && S.stream.getVideoTracks().length) });
+    },
+    /* участник сервера -> объект участника интерфейса */
+    mkPeer(p) { return Object.assign({ speaking: false, poor: false, pinned: false, stream: null }, p, { room: p.room || null }); },
+    peerName(id) { const S = this.S; if (id === 'me' || (S.me && id === S.me.id)) return S.name; const p = S.participants.find(x => x.id === id); return p ? p.name : 'Участник'; },
+    bindServer() {
+      const S = this.S;
+      RTC.handlers = {};
+      RTC.on('error', m => { S.connecting = false; const b = $('[data-a="join"]', this.layer); if (b) { b.disabled = false; b.textContent = S.isHost ? 'Начать встречу' : 'Подключиться'; } if (m.code === 'badpw') { const pw = $('#pjPw', this.layer); if (pw) { pw.focus(); pw.select(); } } toast(m.text, 'bad', 6000); });
+      RTC.on('waiting', m => { if (this.S !== S) return; S.topic = m.topic || S.topic; S.waitingScreen = true; S.joined = false; if (S.stream) S.stream.getAudioTracks().forEach(t => t.enabled = false); this.renderWaiting(m.reason); });
+      RTC.on('denied', () => { if (this.S !== S) return; S.endReason = 'Организатор отклонил ваш запрос на вход'; this.end(false, true); });
+      RTC.on('removed', () => { if (this.S !== S) return; S.endReason = 'Организатор удалил вас из встречи'; this.end(false, true); });
+      RTC.on('ended', () => { if (this.S !== S) return; S.endReason = 'Организатор завершил встречу для всех'; this.end(false, true); });
+      RTC.on('disconnected', () => { if (this.S !== S || S.ended) return; if (S.joined || S.waitingScreen) { S.endReason = 'Соединение с сервером встреч потеряно'; this.end(false, true); } });
+      RTC.on('joined', m => {
+        if (this.S !== S) return;
+        S.me = m.you; S.isHost = !!m.you.host; S.cohost = !!m.you.cohost; S.name = m.you.name; S.connecting = false; S.waitingScreen = false;
+        S.topic = m.room.topic || S.topic; S.pw = m.room.hasPw ? S.pw : '';
+        Object.assign(S, m.room.settings);
+        S.participants = m.peers.map(p => this.mkPeer(p));
+        S.waiting = (m.waiting || []).map(w => this.mkPeer(w));
+        S.polls = m.room.polls || []; this.applyRooms(m.room.rooms || [], null);
+        S.chat = (m.room.chat || []).map(c => this.fromChat(c)); S.chat.push({ sys: true, text: `Вы подключились к встрече · ${now()}` });
+        S.spotlight = m.room.spotlight ? (m.room.spotlight === S.me.id ? 'me' : m.room.spotlight) : null; S.sharing = m.room.sharingId ? (m.room.sharingId === S.me.id ? 'me' : m.room.sharingId) : null; if (S.sharing && S.sharing !== 'me') S.view = 'speaker';
+        if (m.room.wb && m.room.wb.open) { S.wbShared = true; S.wbRemote = true; S.wbState = m.room.wb; }
+        if (m.room.annot && m.room.annot.open) { S.annot = true; S.annotState = m.room.annot; }
+        if (S.muteOnEntry && !S.isHost && S.mic) { S.mic = false; if (S.stream) S.stream.getAudioTracks().forEach(t => t.enabled = false); }
+        if (S.stream) S.stream.getAudioTracks().forEach(t => t.enabled = S.mic);
+        S.joined = true; S.secs = 0;
+        this.renderRoom();
+        this.timers.push(setInterval(() => { S.secs++; const t = $('.room-timer', this.layer); if (t) t.textContent = fmtTime(S.secs); }, 1000));
+        this.sendState();
+        toast(S.isHost ? `Встреча «${S.topic}» началась. Пригласите участников по ссылке` : `Вы во встрече «${S.topic}»`, 'ok');
+      });
+      RTC.on('peer', p => { if (!S.joined) return; if (!S.participants.find(x => x.id === p.id)) S.participants.push(this.mkPeer(p)); const al = this.layer.querySelector('.room-alert'); al && al.remove(); toast(`${p.name} присоединился`, 'ok'); this.renderRoom(); });
+      RTC.on('left', m => { if (!S.joined) return; const p = S.participants.find(x => x.id === m.id); S.participants = S.participants.filter(x => x.id !== m.id); if (this.remoteVideos[m.id]) { this.remoteVideos[m.id].remove(); delete this.remoteVideos[m.id]; } const au = this.audioSink.querySelector(`[data-aid="${m.id}"]`); au && au.remove(); if (S.sharing === m.id) { S.sharing = null; this.closeAnnotations(); } if (S.pinned === m.id) S.pinned = null; if (S.spotlight === m.id) S.spotlight = null; if (m.newHost) { if (S.me && m.newHost === S.me.id) { S.isHost = true; toast('Организатор вышел — теперь вы организатор встречи', 'ok', 5000); } else { const h = S.participants.find(x => x.id === m.newHost); if (h) { h.host = true; } } } if (p && m.reason !== 'waiting') toast(`${p.name} покинул встречу`); this.renderRoom(); });
+      RTC.on('peers', m => { if (!S.joined) return; const map = new Map(S.participants.map(p => [p.id, p])); S.participants = m.peers.filter(p => p.id !== S.me.id).map(p => Object.assign(map.get(p.id) || this.mkPeer(p), p)); const meP = m.peers.find(p => p.id === S.me.id); if (meP) { S.isHost = !!meP.host; S.cohost = !!meP.cohost; } this.renderRoom(); });
+      RTC.on('state', m => { if (!S.joined || !S.me) return; if (m.id === S.me.id) { if (S.sharing === 'me' && !m.peer.sharing) this.stopShare(true); return; } const p = S.participants.find(x => x.id === m.id); if (p) Object.assign(p, m.peer, { stream: p.stream }); const prevShare = S.sharing; S.sharing = m.sharingId ? (m.sharingId === S.me.id ? 'me' : m.sharingId) : null; if (S.sharing && S.sharing !== 'me' && S.sharing !== prevShare) { S.wbShared = false; S.view = 'speaker'; if (S.wb) { S.wb.destroy(); S.wb = null; } S.annot = false; toast(`${this.peerName(S.sharing)} демонстрирует экран`); } if (!S.sharing && prevShare && prevShare !== 'me') this.closeAnnotations(); this.renderRoom(); });
+      RTC.on('track', m => { if (!S.joined) return; const p = S.participants.find(x => x.id === m.id); if (p) p.stream = m.stream; if (m.kind === 'audio') { this.attachAudio(m.id, m.stream); if (S.recMix && S.recMix.add) S.recMix.add(m.stream); } this.renderStage(); });
+      RTC.on('screenTrack', m => { if (!S.joined) return; if (S.sharing === m.id) this.renderStage(); });
+      RTC.on('trackchange', m => { if (S.joined) this.renderStage(); });
+      RTC.on('conn', m => { const p = S.participants.find(x => x.id === m.id); if (p) { p.poor = m.state === 'disconnected' || m.state === 'failed' || m.state === 'checking'; const t = this.layer.querySelector(`.tile-v[data-id="${m.id}"] .connection`); if (t) t.classList.toggle('poor', p.poor); } });
+      RTC.on('chat', m => { if (!S.joined) return; const c = this.fromChat(m.msg); if (c.me) return; S.chat.push(c); if (S.panel !== 'chat') { if (!c.sys) { S.unread++; this.renderToolbar(); } if (!c.sys) toast(`${c.from}: ${(c.text || c.file || '').slice(0, 60)}`, 'info', 3000); } else this.renderPanel(); });
+      RTC.on('react', m => { if (!S.joined) return; this.react(m.id === S.me.id ? 'me' : m.id, m.emoji, true); });
+      RTC.on('caption', m => { if (S.joined && S.captions) this.caption(m.name, m.text); });
+      RTC.on('toast', m => toast(m.text, m.kind || 'info', m.ms || 4000));
+      RTC.on('settings', m => { if (!S.joined) return; Object.assign(S, m.settings); if (!S.isHost) { if (!S.allowUnmute && S.mic) { S.mic = false; if (S.stream) S.stream.getAudioTracks().forEach(t => t.enabled = false); } } this.renderRoom(); });
+      RTC.on('spotlight', m => { if (!S.joined) return; S.spotlight = m.id && m.id === S.me.id ? 'me' : m.id; S.participants.forEach(p => p.spotlight = p.id === m.id); if (S.spotlight) S.view = 'speaker'; this.renderRoom(); });
+      RTC.on('polls', m => { if (!S.joined) return; S.polls = m.polls; if (S.panel === 'polls') this.renderPanel(); else { toast('Обновление опросов — откройте вкладку «Опросы»', 'info', 2500); } });
+      RTC.on('rooms', m => { if (!S.joined) return; this.applyRooms(m.rooms, m.members); this.renderRoom(); });
+      RTC.on('waitlist', m => { if (!S.joined) return; S.waiting = m.list.map(w => this.mkPeer(w)); this.renderToolbar(); if (S.panel === 'participants') this.renderPanel(); });
+      RTC.on('knock', m => { if (S.joined) this.knockAlert(this.mkPeer(m.peer)); });
+      RTC.on('timer', m => { if (S.joined) this.startTimer(m.mins); });
+      RTC.on('topic', m => { if (S.joined) { S.topic = m.topic; this.renderRoom(); } });
+      RTC.on('wb', m => { if (!S.joined) return; this.onRemoteWb(m); });
+      RTC.on('annot', m => { if (!S.joined) return; this.onRemoteAnnot(m); });
+      RTC.on('wbcur', m => { if (!S.joined) return; const wb = m.kind === 'annot' ? S.annotWb : S.wb; if (wb) wb.setCursor(m.id, m.name, m.color, m.x, m.y); });
+      RTC.on('host', m => {
+        if (!S.joined) return;
+        switch (m.action) {
+          case 'mute': if (S.mic) { S.mic = false; if (S.stream) S.stream.getAudioTracks().forEach(t => t.enabled = false); toast(m.reason || 'Организатор выключил ваш микрофон', 'bad', 4000); this.sendState(); this.renderRoom(); } break;
+          case 'askUnmute': App.modal('Запрос организатора', '<p>Организатор просит вас включить микрофон.</p>', [{ label: 'Не сейчас', cls: 'btn-ghost', act: 'close' }, { label: 'Включить микрофон', cls: 'btn-gradient', act: 'ok' }], null, () => { if (!S.mic) this.action('mic'); }); break;
+          case 'camOff': if (S.cam) { S.cam = false; this.getMedia().then(() => { this.sendState(); this.renderStage(); }); toast('Организатор остановил ваше видео', 'bad'); } break;
+          case 'askCam': App.modal('Запрос организатора', '<p>Организатор просит вас включить видео.</p>', [{ label: 'Не сейчас', cls: 'btn-ghost', act: 'close' }, { label: 'Включить видео', cls: 'btn-gradient', act: 'ok' }], null, () => { if (!S.cam) this.action('cam'); }); break;
+          case 'lowerHand': if (S.hand) { S.hand = false; this.sendState(); this.renderRoom(); } break;
+          case 'rename': S.name = m.name; App.user.name = m.name; App.user.initials = SIM.initials(m.name) || 'Я'; toast(`Организатор переименовал вас: ${m.name}`); this.renderRoom(); break;
+          case 'cohost': S.cohost = !!m.value; toast(S.cohost ? 'Вы назначены соорганизатором' : 'Вы больше не соорганизатор'); this.renderRoom(); break;
+          case 'youHost': S.isHost = true; S.cohost = false; toast('Вы назначены организатором встречи', 'ok', 5000); this.renderRoom(); break;
+        }
+      });
+    },
+    sendState() { const S = this.S; if (!S || !S.joined) return; RTC.send({ t: 'state', mic: S.mic && !!(S.stream && S.stream.getAudioTracks().length), cam: S.cam && !!(S.stream && S.stream.getVideoTracks().length), hand: S.hand, sharing: S.sharing === 'me', name: S.name }); },
+    applyRooms(rooms, members) { const S = this.S; S.rooms = (rooms || []).map((r, i) => ({ id: i + 1, name: r.name, open: r.open })); if (members) { const map = new Map(members); S.participants.forEach(p => { p.room = map.get(p.id) || null; }); S.myRoom = S.me ? map.get(S.me.id) || null : null; } if (S.rooms.length && S.rooms[0].open && S.myRoom && !S.isHost) toast(`Организатор открыл сессионные залы. Вы распределены в «${(S.rooms[S.myRoom - 1] || {}).name || 'Зал ' + S.myRoom}»`, 'info', 6000); },
+    playKnock() { try { const ctx = new (window.AudioContext || window.webkitAudioContext)(); const o = ctx.createOscillator(); const g = ctx.createGain(); o.connect(g); g.connect(ctx.destination); o.frequency.value = 660; g.gain.value = .08; o.start(); setTimeout(() => { o.frequency.value = 880; }, 160); setTimeout(() => { o.stop(); ctx.close(); }, 380); } catch (e) { } },
+    fromChat(c) { const S = this.S; const time = typeof c.time === 'number' ? new Date(c.time).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }) : (c.time || now()); c = Object.assign({}, c, { time }); if (c.sys) return { sys: true, text: c.text, time: c.time }; const me = S.me && c.from === S.me.id; return { from: c.name, me, initials: c.initials, color: c.color, text: c.text, file: c.file, fileName: c.fileName, data: c.data, time: c.time, to: c.to, toName: c.to && c.to !== 'all' ? (me ? c.toName : 'вам') : '' }; },
+    attachAudio(id, stream) {
+      let a = this.audioSink.querySelector(`[data-aid="${id}"]`);
+      if (!a) { a = document.createElement('audio'); a.dataset.aid = id; a.autoplay = true; this.audioSink.appendChild(a); }
+      if (a.srcObject !== stream) a.srcObject = stream;
+      if (App.settings.spkId && a.setSinkId) a.setSinkId(App.settings.spkId).catch(() => { });
+      a.play().catch(() => { });
+      this.watchSpeaking(id, stream);
+    },
+    /* индикатор «говорит» для удалённых участников */
+    watchSpeaking(id, stream) {
+      const S = this.S;
+      try {
+        if (!this.remoteCtx || this.remoteCtx.state === 'closed') this.remoteCtx = new (window.AudioContext || window.webkitAudioContext)();
+        this.remoteMeters = this.remoteMeters || {};
+        if (this.remoteMeters[id]) return;
+        const an = this.remoteCtx.createAnalyser(); an.fftSize = 256; this.remoteCtx.createMediaStreamSource(stream).connect(an);
+        const data = new Uint8Array(an.frequencyBinCount);
+        this.remoteMeters[id] = an;
+        const tick = () => {
+          if (this.S !== S || !S.joined) { delete this.remoteMeters[id]; return; }
+          const p = S.participants.find(x => x.id === id); if (!p) { delete this.remoteMeters[id]; return; }
+          an.getByteFrequencyData(data); const lvl = data.reduce((a, b) => a + b, 0) / data.length / 128;
+          const sp = p.mic && lvl > 0.18;
+          if (sp !== p.speaking) { p.speaking = sp; const t = this.layer.querySelector(`.tile-v[data-id="${id}"]`); if (t) t.classList.toggle('speaking', sp); }
+          setTimeout(tick, 200);
+        }; tick();
+      } catch (e) { /* без индикатора */ }
+    },
+    remoteVideo(id, stream) {
+      let v = this.remoteVideos[id];
+      if (!v) { v = document.createElement('video'); v.autoplay = true; v.muted = true; v.playsInline = true; v.setAttribute('playsinline', ''); this.remoteVideos[id] = v; }
+      if (v.srcObject !== stream) v.srcObject = stream;
+      v.play().catch(() => { });
+      return v;
+    },
+    renderWaiting(reason) {
+      const S = this.S;
+      this.layer.classList.add('prejoin-mode');
+      this.layer.innerHTML = `
+        <div class="room-top"><div class="left"><span class="room-title">${icon('shield')} ${esc(S.topic)}</span><span class="tag">ID ${S.id}</span></div>
+        <div class="right"><button class="btn-ghost btn-sm" data-a="cancel">${icon('x')} Выйти</button></div></div>
+        <div class="prejoin" style="grid-template-columns:1fr;max-width:560px;text-align:center">
+          <div class="card" style="padding:36px 28px">
+            <div class="waiting-spinner"></div>
+            <h2 style="font-size:26px;font-weight:900;margin:18px 0 8px">${reason === 'nohost' ? 'Организатор ещё не начал встречу' : 'Подождите, организатор скоро вас впустит'}</h2>
+            <p class="muted">${reason === 'nohost' ? `Вы подключены к встрече с ID ${esc(S.id)}. Как только организатор запустит её, вы войдёте автоматически или попадёте в зал ожидания. Если ждёте слишком долго — проверьте ссылку или идентификатор.` : `Вы в зале ожидания встречи «${esc(S.topic)}». Как только организатор подтвердит вход, вы попадёте во встречу автоматически.`}</p>
+            <div class="preview-box" style="margin:22px auto 0;max-width:320px"><div data-self-video style="position:absolute;inset:0"></div></div>
+          </div>
+        </div>`;
+      this.attachSelf();
+      $('[data-a="cancel"]', this.layer).addEventListener('click', () => this.close());
+    },
+    knockAlert(w) {
+      const S = this.S; const st = $('#stage', this.layer); if (!st) return;
+      const al = document.createElement('div'); al.className = 'room-alert';
+      al.innerHTML = `<span class="avatar avatar-sm" style="background:${w.color}">${w.initials}</span><span class="p-name">${esc(w.name)} ждёт в зале ожидания</span><button class="btn-gradient btn-sm" data-admit="${w.id}">Впустить</button><button class="btn-ghost btn-sm" data-a="panel:participants">Показать</button><button class="btn-icon" data-x>${icon('x')}</button>`;
+      st.appendChild(al);
+      al.querySelector('[data-admit]').addEventListener('click', () => this.admit(w.id));
+      al.querySelector('[data-a]').addEventListener('click', () => { S.panel = 'participants'; this.renderRoom(); });
+      al.querySelector('[data-x]').addEventListener('click', () => al.remove());
+      setTimeout(() => al.remove(), 15000);
+      this.playKnock();
+    },
+    startTimer(mins) {
+      const S = this.S; let left = mins * 60;
+      const old = $('.room-top .left .meeting-timer', this.layer); old && old.remove();
+      const el = document.createElement('span'); el.className = 'room-timer meeting-timer'; el.style.color = '#fbbf24'; $('.room-top .left', this.layer).appendChild(el);
+      const t = setInterval(() => { left--; el.textContent = '⏱ ' + fmtTime(left); if (left <= 0) { clearInterval(t); el.remove(); toast('Время таймера истекло', 'bad'); } }, 1000);
+      this.timers.push(t);
     },
 
     renderRoom() {
@@ -184,7 +340,7 @@
         <div class="room">
           <div class="room-top">
             <div class="left">
-              <span class="room-title"><span class="shield" title="Сквозное шифрование включено">${icon('shield')}</span>${esc(S.topic)}</span>
+              <span class="room-title"><span class="shield" title="Соединение зашифровано (WebRTC DTLS-SRTP)">${icon('shield')}</span>${esc(S.topic)}</span>
               <button class="btn-icon" data-a="info" title="Информация о встрече">${icon('info')}</button>
               <span class="room-timer">${fmtTime(S.secs)}</span>
               <span class="rec-badge ${S.recording ? '' : 'hidden'}" id="recBadge"><i></i> ${S.recPaused ? 'ПАУЗА' : 'ЗАПИСЬ'}</span>
@@ -211,15 +367,15 @@
     /* ---------- сцена ---------- */
     renderStage() {
       const S = this.S, st = $('#stage', this.layer); if (!st) return;
-      const all = [{ id: 'me', name: S.name + ' (Вы)', initials: App.user.initials, color: App.user.color, mic: S.mic, cam: S.cam && !!(S.stream && S.stream.getVideoTracks().length), hand: S.hand, host: S.isHost, me: true, pinned: S.pinned === 'me', spotlight: S.spotlight === 'me' }, ...S.participants];
+      const all = [{ id: 'me', name: S.name + ' (Вы)', initials: App.user.initials, color: App.user.color, mic: S.mic, cam: S.cam && !!(S.stream && S.stream.getVideoTracks().length), hand: S.hand, host: S.isHost, cohost: S.cohost, me: true, pinned: S.pinned === 'me', spotlight: S.spotlight === 'me', room: S.myRoom }, ...S.participants];
       const tile = (p, extra = '') => `
         <div class="tile-v ${p.speaking ? 'speaking' : ''} ${p.pinned ? 'pinned' : ''} ${p.hand ? 'has-hand' : ''}" data-id="${p.id}" ${extra}>
-          ${p.me ? `<div data-self-video style="position:absolute;inset:0"></div>` : (p.cam ? `<div class="video-bars"></div><div class="avatar-wrap"><span class="avatar avatar-lg" style="background:${p.color}">${p.initials}</span></div>` : `<div class="avatar-wrap"><span class="avatar avatar-lg" style="background:${p.color};filter:grayscale(.4)">${p.initials}</span></div>`)}
+          ${p.me ? `<div data-self-video style="position:absolute;inset:0"></div>` : (p.cam && p.stream && p.stream.getVideoTracks().some(t => t.readyState === 'live') ? `<div data-remote-video="${p.id}" style="position:absolute;inset:0"></div>` : `<div class="avatar-wrap"><span class="avatar avatar-lg" style="background:${p.color};${p.cam ? '' : 'filter:grayscale(.4)'}">${p.initials}</span></div>`)}
           <div class="badges">${p.host ? `<span class="badge">${icon('crown')} Организатор</span>` : ''}${p.cohost ? `<span class="badge">Соорганизатор</span>` : ''}${p.spotlight ? `<span class="badge">${icon('star')} В центре</span>` : ''}${p.pinned ? `<span class="badge">${icon('pin')}</span>` : ''}${p.room ? `<span class="badge">Зал ${p.room}</span>` : ''}</div>
           ${p.hand ? `<span class="hand" title="Поднята рука">✋</span>` : ''}
           <div class="tile-menu">
             <button data-t="pin:${p.id}" title="${p.pinned ? 'Открепить' : 'Закрепить'}">${icon('pin')}</button>
-            ${S.isHost && !p.me ? `<button data-t="menu:${p.id}" title="Ещё">${icon('moreV')}</button>` : ''}
+            ${(S.isHost || S.cohost) && !p.me ? `<button data-t="menu:${p.id}" title="Ещё">${icon('moreV')}</button>` : ''}
           </div>
           <span class="name-tag">${p.mic ? icon('mic') : icon('micOff', 'mic-off')} ${esc(p.name)}</span>
           ${!p.me ? `<span class="connection ${p.poor ? 'poor' : ''}" title="Качество связи"><i></i><i></i><i></i><i></i></span>` : ''}
@@ -228,7 +384,7 @@
       let html = '';
       if (S.sharing || S.wbShared) {
         html = `<div class="share-stage">
-          <div class="share-main" id="shareMain">${S.wbShared ? '' : `<span class="share-label">${S.sharing === 'me' ? 'Вы демонстрируете экран' : esc(S.sharing) + ' демонстрирует экран'}</span><div class="share-actions">${S.annot ? '' : `<button class="btn-ghost btn-sm" data-a="annotate" title="Рисовать поверх экрана">${icon('pen')} Комментировать</button>`}${S.sharing === 'me' ? `<button class="btn-danger btn-sm" data-a="share">${icon('stop')} Стоп показ</button>` : ''}</div>`}</div>
+          <div class="share-main" id="shareMain">${S.wbShared ? '' : `<span class="share-label">${S.sharing === 'me' ? 'Вы демонстрируете экран' : esc(this.peerName(S.sharing)) + ' демонстрирует экран'}</span><div class="share-actions">${S.annot ? '' : `<button class="btn-ghost btn-sm" data-a="annotate" title="Рисовать поверх экрана">${icon('pen')} Комментировать</button>`}${S.sharing === 'me' ? `<button class="btn-danger btn-sm" data-a="share">${icon('stop')} Стоп показ</button>` : ''}</div>`}</div>
           <div class="share-side">${all.map(p => tile(p)).join('')}</div></div>`;
       } else if (S.view === 'speaker') {
         const mainId = S.spotlight || S.pinned || (S.participants.find(p => p.speaking) || {}).id || S.participants[0]?.id || 'me';
@@ -245,8 +401,11 @@
         if (!this.shareVideo) { this.shareVideo = document.createElement('video'); this.shareVideo.autoplay = true; this.shareVideo.muted = true; this.shareVideo.playsInline = true; }
         this.shareVideo.srcObject = S.displayStream; $('#shareMain', st).appendChild(this.shareVideo);
       } else if (S.sharing && S.sharing !== 'me') {
-        $('#shareMain', st).insertAdjacentHTML('beforeend', `<div style="position:absolute;inset:0;display:grid;place-items:center;background:linear-gradient(135deg,#0f172a,#1e1b4b);color:#94a3b8;font-weight:700">Демонстрация экрана участника (демо)</div>`);
+        const scr = RTC.remoteScreen(S.sharing);
+        if (scr && scr.getVideoTracks().some(t => t.readyState === 'live')) { const v = this.remoteVideo('screen:' + S.sharing, scr); v.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;object-fit:contain;background:#000'; $('#shareMain', st).appendChild(v); }
+        else $('#shareMain', st).insertAdjacentHTML('beforeend', `<div style="position:absolute;inset:0;display:grid;place-items:center;background:linear-gradient(135deg,#0f172a,#1e1b4b);color:#94a3b8;font-weight:700">Ожидаем видео с экрана ${esc(this.peerName(S.sharing))}…</div>`);
       }
+      st.querySelectorAll('[data-remote-video]').forEach(h => { const id = h.dataset.remoteVideo; const p = S.participants.find(x => x.id === id); if (!p || !p.stream) return; const v = this.remoteVideo(id, p.stream); v.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;object-fit:cover;background:#000'; h.appendChild(v); });
       if (S.wbShared) this.mountWhiteboard($('#shareMain', st));
       if (S.sharing && !S.wbShared && S.annot) this.mountAnnotations($('#shareMain', st));
       st.querySelectorAll('[data-a]').forEach(b => b.addEventListener('click', e => { e.stopPropagation(); this.action(b.dataset.a, b); }));
@@ -270,21 +429,24 @@
         <button data-pm="chat">${icon('chat')} Личное сообщение</button>
         <button data-pm="rename">${icon('edit')} Переименовать</button>
         <button data-pm="host">${icon('crown')} ${p.cohost ? 'Снять соорганизатора' : 'Назначить соорганизатором'}</button>
+        ${S.isHost ? `<button data-pm="makeHost">${icon('crown')} Передать роль организатора</button>` : ''}
         <button data-pm="hand" ${p.hand ? '' : 'disabled'}>${icon('hand')} Опустить руку</button>
         <hr>
         <button data-pm="waiting">${icon('clock')} Отправить в зал ожидания</button>
         <button data-pm="remove" class="danger-text">${icon('userX')} Удалить из встречи</button>`, m => {
         m.querySelectorAll('[data-pm]').forEach(b => b.addEventListener('click', () => {
           const a = b.dataset.pm; this.closePop();
-          if (a === 'mute') { if (p.mic) { p.mic = false; toast(`Микрофон ${p.name} выключен`); } else { toast(`Запрос отправлен: ${p.name} может включить микрофон`); } }
-          if (a === 'cam') { p.cam = !p.cam; }
-          if (a === 'spot') { S.participants.forEach(x => x.spotlight = false); p.spotlight = !p.spotlight; S.spotlight = p.spotlight ? p.id : null; if (p.spotlight) S.view = 'speaker'; }
+          const host = (action, extra = {}) => RTC.send(Object.assign({ t: 'host', action, target: p.id }, extra));
+          if (a === 'mute') { if (p.mic) { host('mute'); toast(`Микрофон ${p.name} выключен`); } else { host('askUnmute'); toast(`Запрос отправлен: ${p.name} может включить микрофон`); } }
+          if (a === 'cam') { if (p.cam) { host('camOff'); toast(`Видео ${p.name} остановлено`); } else { host('askCam'); toast(`Запрос отправлен: ${p.name} может включить видео`); } }
+          if (a === 'spot') { host('spotlight', { value: !p.spotlight }); }
           if (a === 'chat') { S.chatTo = p.id; S.panel = 'chat'; }
-          if (a === 'rename') { const n = prompt('Новое имя участника', p.name); if (n) { p.name = n.trim(); p.initials = SIM.initials(p.name); } }
-          if (a === 'host') { p.cohost = !p.cohost; toast(p.cohost ? `${p.name} — соорганизатор` : `${p.name} больше не соорганизатор`); }
-          if (a === 'hand') p.hand = false;
-          if (a === 'waiting') { S.participants.splice(S.participants.indexOf(p), 1); S.waiting.push({ id: p.id, name: p.name, initials: p.initials, color: p.color }); toast(`${p.name} перемещён в зал ожидания`); }
-          if (a === 'remove') { S.participants.splice(S.participants.indexOf(p), 1); S.chat.push({ sys: true, text: `${p.name} удалён организатором` }); toast(`${p.name} удалён из встречи`); }
+          if (a === 'rename') { const n = prompt('Новое имя участника', p.name); if (n && n.trim()) host('rename', { name: n.trim() }); }
+          if (a === 'host') { host('cohost', { value: !p.cohost }); toast(!p.cohost ? `${p.name} — соорганизатор` : `${p.name} больше не соорганизатор`); }
+          if (a === 'makeHost') { if (confirm(`Передать роль организатора участнику ${p.name}? Вы останетесь во встрече как участник.`)) host('makeHost'); }
+          if (a === 'hand') host('lowerHand');
+          if (a === 'waiting') { host('toWaiting'); toast(`${p.name} перемещён в зал ожидания`); }
+          if (a === 'remove') { if (confirm(`Удалить ${p.name} из встречи?`)) { host('remove'); toast(`${p.name} удалён из встречи`); } }
           this.renderRoom();
         }));
       });
@@ -301,7 +463,7 @@
           <div class="tool-split">${tool('cam', S.cam ? 'video' : 'videoOff', S.cam ? 'Стоп видео' : 'Вкл. видео', S.cam ? '' : 'off')}<button class="caret" data-a="camMenu" title="Настройки видео">${icon('chevUp')}</button></div>
         </div>
         <div class="group center">
-          ${S.isHost ? tool('security', S.locked ? 'lock' : 'shield', 'Безопасность') : ''}
+          ${S.isHost || S.cohost ? tool('security', S.locked ? 'lock' : 'shield', 'Безопасность') : ''}
           ${tool('panel:participants', 'users', 'Участники', S.panel === 'participants' ? 'active' : '', `<span class="count">${S.participants.length + 1}</span>${S.waiting.length ? '<span class="dot"></span>' : ''}`)}
           ${tool('panel:chat', 'chat', 'Чат', S.panel === 'chat' ? 'active' : '', S.unread && S.panel !== 'chat' ? `<span class="count">${S.unread}</span>` : '')}
           <div class="tool-split">${tool('share', S.sharing === 'me' ? 'stop' : 'monitorUp', S.sharing === 'me' ? 'Стоп показ' : 'Демонстрация', S.sharing === 'me' ? 'active' : '')}<button class="caret" data-a="shareMenu" title="Варианты демонстрации">${icon('chevUp')}</button></div>
@@ -322,8 +484,8 @@
       const S = this.S;
       const [act, arg] = a.split(':');
       switch (act) {
-        case 'mic': S.mic = !S.mic; if (S.stream) S.stream.getAudioTracks().forEach(t => t.enabled = S.mic); if (S.mic && !(S.stream && S.stream.getAudioTracks().length)) this.getMedia(); toast(S.mic ? 'Микрофон включён' : 'Микрофон выключен'); break;
-        case 'cam': S.cam = !S.cam; this.getMedia().then(() => this.renderStage()); break;
+        case 'mic': if (!S.mic && !S.isHost && !S.cohost && S.allowUnmute === false) { toast('Организатор запретил включать микрофон', 'bad'); return; } S.mic = !S.mic; if (S.stream) S.stream.getAudioTracks().forEach(t => t.enabled = S.mic); if (S.mic && !(S.stream && S.stream.getAudioTracks().length)) this.getMedia().then(() => this.sendState()); toast(S.mic ? 'Микрофон включён' : 'Микрофон выключен'); this.sendState(); break;
+        case 'cam': S.cam = !S.cam; this.getMedia().then(() => { this.sendState(); this.renderStage(); }); break;
         case 'micMenu': return this.micMenu(btn);
         case 'camMenu': return this.camMenu(btn);
         case 'security': return this.securityMenu(btn);
@@ -332,7 +494,7 @@
         case 'shareMenu': return this.shareMenu(btn);
         case 'record': return S.recording ? this.stopRecording() : this.startRecording();
         case 'reactions': return this.reactionsMenu(btn);
-        case 'hand': S.hand = !S.hand; S.chat.push({ sys: true, text: S.hand ? 'Вы подняли руку' : 'Вы опустили руку' }); break;
+        case 'hand': S.hand = !S.hand; S.chat.push({ sys: true, text: S.hand ? 'Вы подняли руку' : 'Вы опустили руку' }); this.sendState(); break;
         case 'whiteboard': return this.toggleWhiteboard();
         case 'annotate': return this.toggleAnnotations();
         case 'captions': return this.toggleCaptions();
@@ -358,8 +520,17 @@
       }
       setup && setup(pop);
       this.S.activePop = pop;
+      if (anchor.closest('.side-panel')) {
+        // меню в боковой панели: фиксированное позиционирование в пределах окна
+        const r = anchor.getBoundingClientRect(); pop.style.position = 'fixed'; pop.style.bottom = 'auto'; pop.style.transform = 'none'; pop.style.right = 'auto';
+        const h = pop.offsetHeight, w = pop.offsetWidth;
+        pop.style.left = Math.max(8, Math.min(r.right - w, window.innerWidth - w - 8)) + 'px';
+        let top = r.bottom + 6; if (top + h > window.innerHeight - 8) top = Math.max(8, r.top - h - 6); if (top + h > window.innerHeight - 8) top = Math.max(8, window.innerHeight - h - 8);
+        pop.style.top = top + 'px'; pop.style.maxHeight = (window.innerHeight - 16) + 'px'; pop.style.overflowY = 'auto';
+      }
       setTimeout(() => {
         const rect = pop.getBoundingClientRect();
+        if (rect.top < 8 && pop.style.position !== 'fixed') { pop.style.bottom = 'auto'; pop.style.top = 'calc(100% + 6px)'; }
         if (rect.left < 8) { pop.style.left = 'auto'; pop.style.transform = 'none'; pop.style.right = 'auto'; pop.style.left = '8px'; }
         if (rect.right > window.innerWidth - 8) { pop.style.left = 'auto'; pop.style.transform = 'none'; pop.style.right = '8px'; }
         const off = e => { if (!pop.contains(e.target)) { this.closePop(); document.removeEventListener('pointerdown', off); } };
@@ -448,9 +619,10 @@
         <button data-s="suspend" class="danger-text">${icon('shield')} Приостановить действия участников</button>`, m => {
         m.querySelectorAll('[data-s]').forEach(b => b.addEventListener('click', () => {
           const k = b.dataset.s;
-          if (k === 'muteAll') { S.participants.forEach(p => p.mic = false); toast('Звук выключен у всех участников'); }
-          else if (k === 'suspend') { S.locked = true; S.allowShare = S.allowChat = S.allowRename = S.allowUnmute = false; S.sharing = S.sharing === 'me' ? 'me' : null; S.participants.forEach(p => { p.mic = false; p.cam = false; }); toast('Действия участников приостановлены: встреча заблокирована, чат и показ экрана отключены', 'bad', 5000); }
-          else { S[k] = !S[k]; toast({ locked: S.locked ? 'Встреча заблокирована — новые участники не смогут войти' : 'Встреча разблокирована', waitingRoom: S.waitingRoom ? 'Зал ожидания включён' : 'Зал ожидания выключен', allowShare: 'Настройка сохранена', allowChat: 'Настройка сохранена', allowRename: 'Настройка сохранена', allowUnmute: 'Настройка сохранена' }[k]); }
+          const settings = o => { Object.assign(S, o); RTC.send({ t: 'host', action: 'settings', settings: o }); };
+          if (k === 'muteAll') { S.participants.forEach(p => p.mic = false); RTC.send({ t: 'host', action: 'muteAll' }); toast('Звук выключен у всех участников'); }
+          else if (k === 'suspend') { settings({ locked: true, allowShare: false, allowChat: false, allowRename: false, allowUnmute: false }); RTC.send({ t: 'host', action: 'muteAll' }); S.participants.forEach(p => { p.mic = false; }); toast('Действия участников приостановлены: встреча заблокирована, чат и показ экрана отключены', 'bad', 5000); }
+          else { settings({ [k]: !S[k] }); toast({ locked: S.locked ? 'Встреча заблокирована — новые участники не смогут войти' : 'Встреча разблокирована', waitingRoom: S.waitingRoom ? 'Зал ожидания включён' : 'Зал ожидания выключен', allowShare: 'Настройка сохранена', allowChat: 'Настройка сохранена', allowRename: 'Настройка сохранена', allowUnmute: 'Настройка сохранена' }[k]); }
           this.closePop(); this.renderRoom();
         }));
       });
@@ -471,7 +643,7 @@
           if (k === 'cam2') toast('Подключите вторую камеру — она появится в списке камер');
           if (k === 'audio') this.startShare(true);
           if (k === 'annot') this.toggleAnnotations();
-          if (k === 'multi') toast('Одновременная демонстрация разрешена');
+          if (k === 'multi') toast('Сейчас экран показывает один участник за раз: новый показ заменяет предыдущий');
         }));
       });
     },
@@ -487,9 +659,11 @@
         m.querySelectorAll('[data-r]').forEach(b => b.addEventListener('click', () => { const r = b.dataset.r; this.closePop(); if (r === 'hand') this.action('hand'); else { this.react('me', { slow: '🐢', fast: '🐇', away: '☕' }[r]); S.chat.push({ sys: true, text: `Вы: ${b.textContent.trim()}` }); } }));
       });
     },
-    react(id, emoji) {
+    react(id, emoji, remote) {
       const tile = this.layer.querySelector(`.tile-v[data-id="${id}"]`);
       if (tile) { const el = document.createElement('span'); el.className = 'reaction-float'; el.textContent = emoji; tile.appendChild(el); setTimeout(() => el.remove(), 2200); }
+      if (id === 'me' && !remote) RTC.send({ t: 'react', emoji });
+      if (id !== 'me' && remote && !tile) toast(`${this.peerName(id)}: ${emoji}`, 'info', 1500);
       if (id === 'me') { const f = document.createElement('span'); f.className = 'reaction-fly'; f.textContent = emoji; f.style.left = (window.innerWidth / 2 - 60 + Math.random() * 120) + 'px'; f.style.bottom = '90px'; document.body.appendChild(f); setTimeout(() => f.remove(), 2400); }
     },
     moreMenu(btn) {
@@ -519,20 +693,24 @@
         }));
       });
     },
-    statsModal() {
+    async statsModal() {
       const S = this.S; const vt = S.stream && S.stream.getVideoTracks()[0]; const st = vt ? vt.getSettings() : {};
+      const all = await Promise.all(S.participants.map(p => RTC.stats(p.id).then(x => x && Object.assign(x, { name: p.name }))));
+      const rows = all.filter(Boolean);
+      const rtts = rows.map(r => r.rtt).filter(x => x != null); const rtt = rtts.length ? Math.round(rtts.reduce((a, b) => a + b, 0) / rtts.length) : null;
+      const loss = rows.reduce((a, r) => a + (r.loss || 0), 0); const jit = rows.map(r => r.jitter).filter(x => x != null);
       App.modal('Статистика соединения', `
-        <div class="stat-row" style="margin-top:0"><div class="stat"><b>${rnd(18, 42)} мс</b><span>Задержка</span></div><div class="stat"><b>${(Math.random() * .4).toFixed(2)} %</b><span>Потери пакетов</span></div><div class="stat"><b>${rnd(4, 9)} мс</b><span>Джиттер</span></div></div>
-        <div class="stat-row"><div class="stat"><b>${st.width || 0}×${st.height || 0}</b><span>Разрешение отправки</span></div><div class="stat"><b>${st.frameRate ? Math.round(st.frameRate) : 0} fps</b><span>Кадры/с</span></div><div class="stat"><b>${vt ? rnd(900, 2400) : 0} кбит/с</b><span>Битрейт видео</span></div></div>
-        <p class="small muted" style="margin-top:14px">Локальные показатели берутся из настроек вашего видеотрека; сетевые метрики показаны для демонстрации, пока не подключён сервер сигнализации.</p>`, [{ label: 'Закрыть', cls: 'btn-ghost', act: 'close' }]);
+        <div class="stat-row" style="margin-top:0"><div class="stat"><b>${rtt == null ? '—' : rtt + ' мс'}</b><span>Задержка (RTT)</span></div><div class="stat"><b>${loss}</b><span>Потеряно пакетов</span></div><div class="stat"><b>${jit.length ? Math.max(...jit) + ' мс' : '—'}</b><span>Джиттер</span></div></div>
+        <div class="stat-row"><div class="stat"><b>${st.width || 0}×${st.height || 0}</b><span>Разрешение отправки</span></div><div class="stat"><b>${st.frameRate ? Math.round(st.frameRate) : 0} fps</b><span>Кадры/с</span></div><div class="stat"><b>${S.participants.length}</b><span>Соединений</span></div></div>
+        ${rows.length ? `<table style="width:100%;font-size:13px;margin-top:12px;border-collapse:collapse">${rows.map(r => `<tr style="border-top:1px solid var(--border-soft)"><td style="padding:6px 0">${esc(r.name)}</td><td class="muted">${r.rtt == null ? '—' : r.rtt + ' мс'}</td><td class="muted">${r.w ? r.w + '×' + r.h : '—'}</td><td class="muted">${r.fps ? Math.round(r.fps) + ' fps' : '—'}</td></tr>`).join('')}</table>` : '<p class="small muted" style="margin-top:12px">Пока других участников нет — сетевые показатели появятся, когда кто-то подключится.</p>'}
+        <p class="small muted" style="margin-top:14px">Соединения устанавливаются напрямую между участниками (WebRTC); данные — из статистики браузера.</p>`, [{ label: 'Закрыть', cls: 'btn-ghost', act: 'close' }]);
     },
     timerModal() {
       const S = this.S;
-      App.modal('Таймер для встречи', `<label class="field">Длительность, минут<input type="number" id="tmMin" value="10" min="1" max="180"></label><p class="small muted">Таймер виден всем участникам в верхней панели.</p>`, [{ label: 'Отмена', cls: 'btn-ghost', act: 'close' }, { label: 'Запустить', cls: 'btn-gradient', act: 'ok' }], null, () => {
-        const mins = +$('#tmMin').value || 10; let left = mins * 60;
-        const el = document.createElement('span'); el.className = 'room-timer'; el.style.color = '#fbbf24'; $('.room-top .left', this.layer).appendChild(el);
-        const t = setInterval(() => { left--; el.textContent = '⏱ ' + fmtTime(left); if (left <= 0) { clearInterval(t); el.remove(); toast('Время таймера истекло', 'bad'); } }, 1000);
-        this.timers.push(t); S.chat.push({ sys: true, text: `Организатор запустил таймер на ${mins} мин` }); this.renderPanel();
+      App.modal('Таймер для встречи', `<label class="field">Длительность, минут<input type="number" id="tmMin" value="10" min="1" max="180"></label><p class="small muted">${this.S.isHost || this.S.cohost ? 'Таймер виден всем участникам в верхней панели.' : 'Таймер будет виден только вам.'}</p>`, [{ label: 'Отмена', cls: 'btn-ghost', act: 'close' }, { label: 'Запустить', cls: 'btn-gradient', act: 'ok' }], null, () => {
+        const mins = +$('#tmMin').value || 10;
+        this.startTimer(mins);
+        if (S.isHost || S.cohost) RTC.send({ t: 'host', action: 'timer', mins }); else { S.chat.push({ sys: true, text: `Вы запустили таймер на ${mins} мин (виден только вам)` }); this.renderPanel(); }
       });
     },
     appsModal() {
@@ -545,23 +723,26 @@
         <div style="display:grid;gap:10px;font-size:14px">
           <div><span class="muted">Тема</span><br><b>${esc(S.topic)}</b></div>
           <div><span class="muted">Идентификатор</span><br><b style="font-size:22px;letter-spacing:2px">${S.id}</b></div>
-          <div><span class="muted">Организатор</span><br><b>${S.isHost ? esc(S.name) : 'Организатор встречи'}</b></div>
+          <div><span class="muted">Организатор</span><br><b>${S.isHost ? esc(S.name) : esc((S.participants.find(p => p.host) || {}).name || 'Организатор встречи')}</b></div>
           <div><span class="muted">Код доступа</span><br><b>${S.pw || 'не требуется'}</b></div>
           <div><span class="muted">Ссылка для приглашения</span><br><code style="word-break:break-all;color:#7dd3fc">${this.inviteLink()}</code></div>
-          <div><span class="muted">Шифрование</span><br><span class="tag ok">${icon('shield')} сквозное (E2EE)</span></div>
+          <div><span class="muted">Шифрование</span><br><span class="tag ok">${icon('shield')} WebRTC DTLS-SRTP, соединения напрямую между участниками</span></div>
         </div>`, [{ label: 'Скопировать приглашение', cls: 'btn-gradient', act: 'ok' }, { label: 'Закрыть', cls: 'btn-ghost', act: 'close' }], null, () => this.copyInvite());
     },
-    inviteLink() { return `${location.origin}${location.pathname}#/join/${this.S.id.replace(/\s/g, '')}`; },
+    inviteLink() { return App.inviteLink(this.S.id, this.S.pw); },
     copyInvite() {
-      const S = this.S; const text = `${App.user.name} приглашает вас на встречу FORMYLA Meet\n\nТема: ${S.topic}\nСсылка: ${this.inviteLink()}\nИдентификатор: ${S.id}${S.pw ? `\nКод доступа: ${S.pw}` : ''}`;
+      const S = this.S; const text = `${S.name || 'Организатор'} приглашает вас на встречу FORMYLA Meet\n\nТема: ${S.topic}\nСсылка: ${this.inviteLink()}\nИдентификатор: ${S.id}${S.pw ? `\nКод доступа: ${S.pw}` : ''}`;
       navigator.clipboard ? navigator.clipboard.writeText(text).then(() => toast('Приглашение скопировано', 'ok')).catch(() => toast('Не удалось скопировать — скопируйте вручную из окна информации', 'bad')) : toast('Буфер обмена недоступен', 'bad');
     },
     leaveMenu(btn) {
       const S = this.S;
-      this.popover(btn, `${S.isHost ? `<button data-l="end" class="danger-text">${icon('phone')} Завершить встречу для всех</button><button data-l="assign">${icon('crown')} Выйти и назначить организатора</button>` : ''}<button data-l="leave">${icon('logout')} Покинуть встречу</button>`, m => {
+      this.popover(btn, `${S.isHost ? `<button data-l="end" class="danger-text">${icon('phone')} Завершить встречу для всех</button>${S.participants.length ? `<button data-l="assign">${icon('crown')} Выйти и назначить организатора</button>` : ''}` : ''}<button data-l="leave">${icon('logout')} Покинуть встречу</button>`, m => {
         m.querySelectorAll('[data-l]').forEach(b => b.addEventListener('click', () => {
           const k = b.dataset.l; this.closePop();
-          if (k === 'assign') { const p = S.participants[0]; if (p) toast(`${p.name} назначен организатором`); }
+          if (k === 'assign') {
+            App.modal('Назначить организатора', `<label class="field">Кто станет организатором<select id="asHost">${S.participants.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join('')}</select></label>`, [{ label: 'Отмена', cls: 'btn-ghost', act: 'close' }, { label: 'Назначить и выйти', cls: 'btn-gradient', act: 'ok' }], null, () => { const id = $('#asHost').value; const p = S.participants.find(x => x.id === id); RTC.send({ t: 'host', action: 'makeHost', target: id }); if (p) toast(`${p.name} назначен организатором`); setTimeout(() => this.end(false), 150); });
+            return;
+          }
           this.end(k === 'end');
         }));
       }, 'right');
@@ -573,30 +754,61 @@
       if (!S.isHost && !S.allowShare) return toast('Организатор запретил демонстрацию экрана', 'bad');
       try {
         S.displayStream = await navigator.mediaDevices.getDisplayMedia({ video: !audioOnly || true, audio: true });
-        S.sharing = 'me'; S.wbShared = false;
-        S.displayStream.getVideoTracks()[0].addEventListener('ended', () => this.stopShare());
+        if (S.wbShared) this.toggleWhiteboard();
+        S.sharing = 'me'; S.wbShared = false; this.closeAnnotations();
+        const vt = S.displayStream.getVideoTracks()[0];
+        vt.addEventListener('ended', () => this.stopShare());
+        RTC.setScreenTrack(vt);
+        this.sendState();
         S.chat.push({ sys: true, text: 'Вы начали демонстрацию экрана' });
-        this.renderRoom(); toast('Демонстрация экрана начата', 'ok');
+        this.renderRoom(); toast('Демонстрация экрана начата — участники видят ваш экран', 'ok');
       } catch (e) {
         if (e.name === 'NotAllowedError') toast('Демонстрация отменена или запрещена в этом окне. Откройте приложение в отдельной вкладке', 'bad', 5000);
         else toast('Демонстрация экрана недоступна: ' + e.message, 'bad');
       }
     },
-    stopShare() {
+    stopShare(silent) {
       const S = this.S; if (S.displayStream) S.displayStream.getTracks().forEach(t => t.stop()); S.displayStream = null;
+      RTC.setScreenTrack(null);
       if (S.sharing === 'me') S.chat.push({ sys: true, text: 'Вы остановили демонстрацию экрана' });
-      S.sharing = null; this.closeAnnotations(); this.renderRoom();
+      if (S.sharing === 'me') { S.sharing = null; if (!silent) this.sendState(); }
+      this.closeAnnotations(); this.renderRoom();
     },
 
     /* ---------- аннотации поверх демонстрации экрана ---------- */
     toggleAnnotations() {
       const S = this.S;
       if (!S.sharing) return toast('Сначала начните демонстрацию экрана', 'bad');
-      if (S.annot) { this.closeAnnotations(); } else { S.annot = true; S.chat.push({ sys: true, text: 'Вы начали комментировать демонстрацию экрана' }); toast('Рисуйте поверх экрана — инструменты вверху. Пометки видят все участники', 'ok', 3500); }
+      if (S.annot) { const mine = S.sharing === 'me' || S.isHost || (S.annotState && S.me && S.annotState.by === S.me.id); this.closeAnnotations(); if (mine) RTC.send({ t: 'annot', action: 'close' }); }
+      else { S.annot = true; S.annotState = S.annotState && S.annotState.open ? S.annotState : { open: true, pages: [{ shapes: [] }] }; RTC.send({ t: 'annot', action: 'open', pages: S.annotState.pages }); S.chat.push({ sys: true, text: 'Вы начали комментировать демонстрацию экрана' }); toast('Рисуйте поверх экрана — инструменты вверху. Пометки видят все участники', 'ok', 3500); }
       this.renderRoom();
     },
     closeAnnotations() {
-      const S = this.S; if (S.annotWb) { S.annotWb.destroy(); S.annotWb = null; } S.annotPages = null; S.annot = false;
+      const S = this.S; if (S.annotWb) { S.annotWb.destroy(); S.annotWb = null; } S.annotPages = null; S.annot = false; S.annotState = null;
+    },
+    onRemoteAnnot(m) {
+      const S = this.S;
+      if (m.action === 'open') { if (!S.sharing) return; S.annotState = m.annot; S.annot = true; toast(`${this.peerName(m.from)} комментирует экран`, 'info', 2500); this.renderRoom(); }
+      else if (m.action === 'close') { if (S.annot) { this.closeAnnotations(); this.renderRoom(); } }
+      else if (m.action === 'sync' && m.annot) { S.annotState = m.annot; if (S.annotWb) this.applyPages(S.annotWb, m.annot.pages); }
+    },
+    /* применить страницы, пришедшие от другого участника (не прерывая текущий штрих) */
+    applyPages(wb, pages) {
+      if (!pages) return;
+      if (wb.drawing || wb.dragging || wb.erasing) { wb.__pendingPages = pages; return; }
+      const cur = wb.pages[wb.page];
+      wb.pages = pages.map((p, i) => ({ shapes: p.shapes || [], undo: (wb.pages[i] || {}).undo || [], redo: [] }));
+      if (!wb.pages.length) wb.pages = [{ shapes: [], undo: [], redo: [] }];
+      wb.page = Math.min(wb.page, wb.pages.length - 1); wb.selected = null;
+      if (wb.__lastBg && wb.bg !== wb.__lastBg) { /* фон меняет тот, кто прислал */ }
+      wb.renderPages(); wb.render();
+    },
+    /* локальное изменение доски -> отправить всем (с учётом отложенных чужих изменений) */
+    wbChanged(wb, kind) {
+      const S = this.S;
+      if (wb.__pendingPages) { const pend = wb.__pendingPages; wb.__pendingPages = null; pend.forEach((p, i) => { if (!wb.pages[i]) wb.pages[i] = { shapes: [], undo: [], redo: [] }; const ids = new Set(wb.pages[i].shapes.map(s => s.id)); (p.shapes || []).forEach(sh => { if (!ids.has(sh.id)) wb.pages[i].shapes.push(sh); }); }); wb.renderPages(); wb.render(); }
+      clearTimeout(wb.__syncT);
+      wb.__syncT = setTimeout(() => { if (this.S !== S) return; const pages = wb.pages.map(p => ({ shapes: p.shapes })); if (kind === 'annot') { if (S.annotState) S.annotState.pages = pages; RTC.send({ t: 'annot', action: 'sync', pages }); } else { if (S.wbState) S.wbState.pages = pages; RTC.send({ t: 'wb', action: 'sync', pages, bg: wb.bg, title: wb.title }); } }, 120);
     },
     mountAnnotations(container) {
       const S = this.S;
@@ -604,16 +816,34 @@
       container.appendChild(host);
       const saved = S.annotWb ? { pages: S.annotWb.pages, page: S.annotWb.page, tool: S.annotWb.tool, color: S.annotWb.color, size: S.annotWb.size, collapsed: !!S.annotWb.root.querySelector('.wb-top.collapsed') } : null;
       if (S.annotWb) S.annotWb.destroy();
-      S.annotWb = new Whiteboard(host, { overlay: true, title: 'Комментирование экрана', onClose: () => { this.closeAnnotations(); this.renderRoom(); }, underlay: () => this.shareVideo, collaborators: S.participants.slice(0, 2).map(p => ({ name: p.name.split(' ')[0], initials: p.initials, color: p.solid })) });
+      S.annotWb = new Whiteboard(host, { overlay: true, fitSpace: [1600, 900], title: 'Комментирование экрана', onClose: () => this.toggleAnnotations(), underlay: () => S.sharing === 'me' ? this.shareVideo : this.remoteVideos['screen:' + S.sharing], collaborators: S.participants.map(p => ({ name: p.name.split(' ')[0], initials: p.initials, color: p.solid })), onChange: () => this.wbChanged(S.annotWb, 'annot'), onCursor: p => RTC.send({ t: 'wbcur', kind: 'annot', x: p.x, y: p.y }) });
       if (saved) { S.annotWb.pages = saved.pages; S.annotWb.page = saved.page; S.annotWb.setColor(saved.color); S.annotWb.size = saved.size; S.annotWb.setTool(saved.tool); S.annotWb.render(); if (saved.collapsed) S.annotWb.root.querySelector('[data-act=hide]').click(); }
+      else if (S.annotState && S.annotState.pages) this.applyPages(S.annotWb, S.annotState.pages);
     },
 
     /* ---------- доска ---------- */
     toggleWhiteboard(force) {
       const S = this.S;
-      if (S.wbShared && !force) { S.wbShared = false; if (S.wb) { S.wb.destroy(); } S.chat.push({ sys: true, text: 'Доска закрыта' }); }
-      else { S.wbShared = true; S.sharing = null; if (S.displayStream) this.stopShare(); S.chat.push({ sys: true, text: 'Вы открыли общую доску' }); }
+      if (S.wbShared && !force) {
+        const mine = S.isHost || S.cohost || (S.wbState && S.me && S.wbState.by === S.me.id);
+        S.wbShared = false; if (S.wb) { S.wb.destroy(); S.wb = null; } S.chat.push({ sys: true, text: mine ? 'Доска закрыта' : 'Вы скрыли доску (у остальных она открыта)' });
+        if (mine) { RTC.send({ t: 'wb', action: 'close' }); S.wbState = null; }
+      } else if (!S.wbShared) {
+        if (!S.isHost && !S.cohost && S.allowShare === false) return toast('Организатор запретил показ доски и экрана', 'bad');
+        if (S.sharing === 'me' || S.displayStream) this.stopShare();
+        S.wbShared = true; S.sharing = null;
+        const pages = S.wbState && S.wbState.pages ? S.wbState.pages : [{ shapes: [] }];
+        S.wbState = { open: true, by: S.me && S.me.id, title: `Доска · ${S.topic}`, pages, page: 0, bg: 'dots' };
+        RTC.send({ t: 'wb', action: 'open', title: S.wbState.title, pages, bg: 'dots' });
+        S.chat.push({ sys: true, text: 'Вы открыли общую доску' });
+      }
       this.renderRoom();
+    },
+    onRemoteWb(m) {
+      const S = this.S;
+      if (m.action === 'open') { if (S.sharing === 'me') this.stopShare(true); S.sharing = null; S.wbState = m.wb; S.wbShared = true; if (S.wb) { S.wb.destroy(); S.wb = null; } toast(`${this.peerName(m.from)} открыл общую доску`, 'info', 3000); this.renderRoom(); }
+      else if (m.action === 'close') { if (S.wbShared) { S.wbShared = false; if (S.wb) { S.wb.destroy(); S.wb = null; } S.wbState = null; S.chat.push({ sys: true, text: `${this.peerName(m.from)} закрыл доску` }); this.renderRoom(); } }
+      else if (m.action === 'sync' && m.wb) { S.wbState = m.wb; if (S.wb) { if (m.wb.bg && S.wb.bg !== m.wb.bg) S.wb.bg = m.wb.bg; this.applyPages(S.wb, m.wb.pages); } }
     },
     mountWhiteboard(container) {
       const S = this.S;
@@ -621,8 +851,9 @@
       container.appendChild(host);
       const saved = S.wb ? { pages: S.wb.pages, page: S.wb.page, title: S.wb.title, bg: S.wb.bg } : null;
       if (S.wb) S.wb.destroy();
-      S.wb = new Whiteboard(host, { title: saved ? saved.title : `Доска · ${S.topic}`, onClose: () => this.toggleWhiteboard(), collaborators: S.participants.slice(0, 3).map(p => ({ name: p.name.split(' ')[0], initials: p.initials, color: p.solid })), onChange: () => { S.wbDirty = true; } });
+      S.wb = new Whiteboard(host, { title: saved ? saved.title : (S.wbState && S.wbState.title) || `Доска · ${S.topic}`, onClose: () => this.toggleWhiteboard(), collaborators: S.participants.map(p => ({ name: p.name.split(' ')[0], initials: p.initials, color: p.solid })), onChange: () => { S.wbDirty = true; this.wbChanged(S.wb, 'wb'); }, onCursor: p => RTC.send({ t: 'wbcur', kind: 'wb', x: p.x, y: p.y }) });
       if (saved) { S.wb.pages = saved.pages; S.wb.page = saved.page; S.wb.bg = saved.bg; S.wb.setTool(S.wb.tool); S.wb.renderPages(); S.wb.render(); }
+      else if (S.wbState && S.wbState.pages) { if (S.wbState.bg) S.wb.bg = S.wbState.bg; this.applyPages(S.wb, S.wbState.pages); }
     },
 
     /* ---------- запись ---------- */
@@ -635,14 +866,19 @@
         if (!S.recording) return;
         cx.fillStyle = '#0b1220'; cx.fillRect(0, 0, 1280, 720);
         const all = [{ name: S.name, initials: App.user.initials, solid: '#8b5cf6', me: true }, ...S.participants];
-        const n = all.length, cols = n <= 1 ? 1 : n <= 4 ? 2 : 3, rows = Math.ceil(n / cols), w = 1280 / cols, h = 660 / rows;
+        const shareV = S.sharing === 'me' ? this.shareVideo : (S.sharing ? this.remoteVideos['screen:' + S.sharing] : null);
+        const hasShare = shareV && shareV.videoWidth;
+        let gx = 0, gw = 1280;
+        if (hasShare) { gx = 960; gw = 320; const vr = shareV.videoWidth / shareV.videoHeight, tr = 952 / 660; let dw = 952, dh = 660; if (vr > tr) dh = 952 / vr; else dw = 660 * vr; cx.fillStyle = '#000'; cx.fillRect(4, 4, 952, 660); cx.drawImage(shareV, 4 + (952 - dw) / 2, 4 + (660 - dh) / 2, dw, dh); }
+        const n = all.length, cols = hasShare ? 1 : n <= 1 ? 1 : n <= 4 ? 2 : 3, rows = Math.ceil(n / cols), w = gw / cols, h = 660 / rows;
         all.forEach((p, i) => {
-          const x = (i % cols) * w + 8, y = Math.floor(i / cols) * h + 8, tw = w - 16, th = h - 16;
+          const x = gx + (i % cols) * w + 8, y = Math.floor(i / cols) * h + 8, tw = w - 16, th = h - 16;
           cx.fillStyle = '#172033'; cx.beginPath(); cx.roundRect ? cx.roundRect(x, y, tw, th, 16) : cx.rect(x, y, tw, th); cx.fill();
-          if (p.me && this.selfVideo && this.selfVideo.srcObject && this.selfVideo.videoWidth) {
+          const rv = p.me ? (this.selfVideo && this.selfVideo.srcObject && S.cam ? this.selfVideo : null) : (p.cam ? this.remoteVideos[p.id] : null);
+          if (rv && rv.videoWidth) {
             cx.save(); cx.beginPath(); cx.roundRect ? cx.roundRect(x, y, tw, th, 16) : cx.rect(x, y, tw, th); cx.clip();
-            const vr = this.selfVideo.videoWidth / this.selfVideo.videoHeight, tr = tw / th; let dw = tw, dh = th; if (vr > tr) dw = th * vr; else dh = tw / vr;
-            if (S.mirror) { cx.translate(x + tw, 0); cx.scale(-1, 1); cx.drawImage(this.selfVideo, (tw - dw) / 2, y + (th - dh) / 2, dw, dh); } else cx.drawImage(this.selfVideo, x + (tw - dw) / 2, y + (th - dh) / 2, dw, dh);
+            const vr = rv.videoWidth / rv.videoHeight, tr = tw / th; let dw = tw, dh = th; if (vr > tr) dw = th * vr; else dh = tw / vr;
+            if (p.me && S.mirror) { cx.translate(x + tw, 0); cx.scale(-1, 1); cx.drawImage(rv, (tw - dw) / 2, y + (th - dh) / 2, dw, dh); } else cx.drawImage(rv, x + (tw - dw) / 2, y + (th - dh) / 2, dw, dh);
             cx.restore();
           } else { cx.fillStyle = p.solid || '#8b5cf6'; cx.beginPath(); cx.arc(x + tw / 2, y + th / 2, Math.min(tw, th) / 5, 0, 7); cx.fill(); cx.fillStyle = '#fff'; cx.font = `800 ${Math.min(tw, th) / 7}px Satoshi, sans-serif`; cx.textAlign = 'center'; cx.textBaseline = 'middle'; cx.fillText(p.initials, x + tw / 2, y + th / 2); }
           cx.fillStyle = 'rgba(6,10,20,.75)'; cx.fillRect(x + 12, y + th - 40, cx.measureText(p.name).width * .6 + 60, 28);
@@ -653,7 +889,14 @@
         S.recRaf = requestAnimationFrame(draw);
       };
       const stream = cv.captureStream(15);
-      if (S.stream) S.stream.getAudioTracks().forEach(t => stream.addTrack(t));
+      try {
+        const ctx = new (window.AudioContext || window.webkitAudioContext)(); const dest = ctx.createMediaStreamDestination(); S.recMix = { ctx, dest, added: new Set() };
+        const addSrc = (ms) => { if (!ms || !ms.getAudioTracks().length || S.recMix.added.has(ms)) return; S.recMix.added.add(ms); ctx.createMediaStreamSource(ms).connect(dest); };
+        if (S.stream) addSrc(S.stream);
+        S.participants.forEach(p => addSrc(RTC.remoteStream(p.id)));
+        S.recMix.add = addSrc;
+        dest.stream.getAudioTracks().forEach(t => stream.addTrack(t));
+      } catch (e) { if (S.stream) S.stream.getAudioTracks().forEach(t => stream.addTrack(t)); }
       const mime = ['video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm', 'video/mp4'].find(m => MediaRecorder.isTypeSupported(m)) || '';
       try { S.recorder = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined); } catch (e) { return toast('Не удалось начать запись: ' + e.message, 'bad'); }
       const rec = S.recorder; S.recChunks = []; rec.ondataavailable = e => { if (e.data.size) S.recChunks.push(e.data); };
@@ -674,6 +917,7 @@
       S.recording = false; cancelAnimationFrame(S.recRaf); clearInterval(S.recTick);
       try { S.recorder.stop(); } catch (e) { /* уже остановлен */ }
       S.recorder = null; S.chat.push({ sys: true, text: 'Запись остановлена' });
+      if (S.recMix) { try { S.recMix.ctx.close(); } catch (e) { } S.recMix = null; }
       this.renderRoom();
     },
 
@@ -685,11 +929,11 @@
         if (SR) {
           try {
             S.rec = new SR(); S.rec.lang = 'ru-RU'; S.rec.continuous = true; S.rec.interimResults = true;
-            S.rec.onresult = e => { const r = e.results[e.results.length - 1]; this.caption(S.name, r[0].transcript); };
+            S.rec.onresult = e => { const r = e.results[e.results.length - 1]; const text = r[0].transcript; this.caption(S.name, text); if (r.isFinal || !S.capSentAt || Date.now() - S.capSentAt > 700) { S.capSentAt = Date.now(); RTC.send({ t: 'caption', text }); } };
             S.rec.onerror = () => { }; S.rec.onend = () => { if (S.captions && S.rec) try { S.rec.start(); } catch (e) { } };
-            S.rec.start(); toast('Субтитры включены: ваша речь распознаётся, речь участников — демо', 'ok', 4000);
-          } catch (e) { toast('Субтитры включены (демо)', 'ok'); }
-        } else toast('Субтитры включены (демо-режим, распознавание речи недоступно в браузере)', 'ok', 4000);
+            S.rec.start(); toast('Субтитры включены: ваша речь распознаётся и показывается участникам с включёнными субтитрами', 'ok', 4500);
+          } catch (e) { toast('Субтитры включены: вы будете видеть речь участников, у которых работает распознавание', 'ok', 4500); }
+        } else toast('Субтитры включены: вы будете видеть речь участников, у которых работает распознавание (в этом браузере оно недоступно)', 'ok', 5000);
       } else { if (S.rec) { S.rec.onend = null; S.rec.stop(); S.rec = null; } S.captionText = ''; }
       this.renderRoom();
     },
@@ -706,25 +950,26 @@
       const tabs = [['participants', `Участники (${S.participants.length + 1})`], ['chat', 'Чат'], ['polls', 'Опросы'], ['rooms', 'Залы']];
       let body = '', foot = '';
       if (S.panel === 'participants') {
-        const pi = p => `<div class="p-item" data-pid="${p.id}"><span class="avatar avatar-sm" style="background:${p.color}">${p.initials}</span><span class="p-name">${esc(p.name)}${p.me ? ' (Вы)' : ''}<small>${p.host ? 'Организатор' : p.cohost ? 'Соорганизатор' : p.room ? 'Зал ' + p.room : 'Участник'}</small></span>${p.hand ? '<span title="Рука поднята">✋</span>' : ''}<span class="p-icons">${p.mic ? icon('mic', 'on') : icon('micOff', 'off')}${p.cam ? icon('video', 'on') : icon('videoOff', 'off')}</span>${S.isHost && !p.me ? `<button class="btn-icon p-more" data-pmenu="${p.id}">${icon('moreV')}</button>` : ''}</div>`;
-        const me = { id: 'me', name: S.name, initials: App.user.initials, color: App.user.color, mic: S.mic, cam: S.cam, hand: S.hand, host: S.isHost, me: true };
+        const pi = p => `<div class="p-item" data-pid="${p.id}"><span class="avatar avatar-sm" style="background:${p.color}">${p.initials}</span><span class="p-name">${esc(p.name)}${p.me ? ' (Вы)' : ''}<small>${p.host ? 'Организатор' : p.cohost ? 'Соорганизатор' : p.room ? 'Зал ' + p.room : 'Участник'}</small></span>${p.hand ? '<span title="Рука поднята">✋</span>' : ''}<span class="p-icons">${p.mic ? icon('mic', 'on') : icon('micOff', 'off')}${p.cam ? icon('video', 'on') : icon('videoOff', 'off')}</span>${(S.isHost || S.cohost) && !p.me ? `<button class="btn-icon p-more" data-pmenu="${p.id}">${icon('moreV')}</button>` : ''}</div>`;
+        const me = { id: 'me', name: S.name, initials: App.user.initials, color: App.user.color, mic: S.mic, cam: S.cam, hand: S.hand, host: S.isHost, cohost: S.cohost, room: S.myRoom, me: true };
         body = `
           ${S.waiting.length ? `<div class="p-group">В зале ожидания (${S.waiting.length})</div>${S.waiting.map(w => `<div class="waiting-item"><span class="avatar avatar-sm" style="background:${w.color}">${w.initials}</span><span class="p-name">${esc(w.name)}</span><button class="btn-gradient btn-sm" data-admit="${w.id}">Впустить</button><button class="btn-ghost btn-sm" data-deny="${w.id}">${icon('x')}</button></div>`).join('')}${S.waiting.length > 1 ? `<button class="btn-ghost btn-sm" data-admitall>Впустить всех</button>` : ''}` : ''}
           <div class="p-group">Во встрече (${S.participants.length + 1})</div>
           ${pi(me)}${[...S.participants].sort((a, b) => (b.hand - a.hand) || (b.host - a.host)).map(pi).join('')}`;
-        foot = S.isHost ? `<button class="btn-ghost btn-sm" data-pa="invite">${icon('link')} Пригласить</button><button class="btn-ghost btn-sm" data-pa="muteAll">${icon('micOff')} Выкл. звук всем</button><button class="btn-ghost btn-sm" data-pa="lowerAll">${icon('hand')} Опустить руки</button>` : `<button class="btn-ghost btn-sm" data-pa="invite">${icon('link')} Пригласить</button>`;
+        foot = S.isHost || S.cohost ? `<button class="btn-ghost btn-sm" data-pa="invite">${icon('link')} Пригласить</button><button class="btn-ghost btn-sm" data-pa="muteAll">${icon('micOff')} Выкл. звук всем</button><button class="btn-ghost btn-sm" data-pa="lowerAll">${icon('hand')} Опустить руки</button>` : `<button class="btn-ghost btn-sm" data-pa="invite">${icon('link')} Пригласить</button>`;
       }
       if (S.panel === 'chat') {
-        body = `<div id="chatList" style="display:flex;flex-direction:column;gap:12px">${S.chat.map(m => m.sys ? `<div class="chat-msg system"><div class="bubble"><div class="text">${esc(m.text)}</div></div></div>` : `<div class="chat-msg ${m.me ? 'me' : ''}"><span class="avatar" style="background:${m.color}">${m.initials}</span><div class="bubble"><div class="meta"><b>${esc(m.from)}</b>${m.to && m.to !== 'all' ? `<span class="private">→ ${esc(m.toName)} (лично)</span>` : ''}<span>${m.time}</span></div><div class="text">${m.file ? `<span class="file">${icon('file')} ${esc(m.file)}</span>` : App.linkify(esc(m.text))}</div></div></div>`).join('')}</div><div class="typing" id="typing"></div>`;
-        foot = `<div class="chat-input"><div class="to">Кому: <select id="chatTo">${[['all', 'Все'], ...S.participants.map(p => [p.id, p.name])].map(([v, l]) => `<option value="${v}" ${S.chatTo === v ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select><label class="btn-icon" title="Прикрепить файл" style="margin-left:auto">${icon('file')}<input type="file" class="sr-only" id="chatFile"></label><button class="btn-icon" id="chatEmoji" title="Эмодзи">${icon('smile')}</button></div><div class="row"><textarea id="chatText" placeholder="${S.allowChat || S.isHost ? 'Введите сообщение… (Enter — отправить)' : 'Чат отключён организатором'}" ${S.allowChat || S.isHost ? '' : 'disabled'}></textarea><button class="btn-gradient" id="chatSend" style="padding:0 14px">${icon('send')}</button></div></div>`;
+        body = `<div id="chatList" style="display:flex;flex-direction:column;gap:12px">${S.chat.map(m => m.sys ? `<div class="chat-msg system"><div class="bubble"><div class="text">${esc(m.text)}</div></div></div>` : `<div class="chat-msg ${m.me ? 'me' : ''}"><span class="avatar" style="background:${m.color}">${m.initials}</span><div class="bubble"><div class="meta"><b>${esc(m.from)}</b>${m.to && m.to !== 'all' ? `<span class="private">→ ${esc(m.toName)} (лично)</span>` : ''}<span>${m.time}</span></div><div class="text">${m.file ? (m.data ? `<a class="file" href="${m.data}" download="${esc(m.fileName || 'file')}" style="color:#7dd3fc">${icon('file')} ${esc(m.file)} · скачать</a>` : `<span class="file">${icon('file')} ${esc(m.file)}</span>`) : App.linkify(esc(m.text))}</div></div></div>`).join('')}</div><div class="typing" id="typing"></div>`;
+        foot = `<div class="chat-input"><div class="to">Кому: <select id="chatTo">${[['all', 'Все'], ...S.participants.map(p => [p.id, p.name])].map(([v, l]) => `<option value="${v}" ${S.chatTo === v ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select><label class="btn-icon" title="Прикрепить файл" style="margin-left:auto">${icon('file')}<input type="file" class="sr-only" id="chatFile"></label><button class="btn-icon" id="chatEmoji" title="Эмодзи">${icon('smile')}</button></div><div class="row"><textarea id="chatText" placeholder="${S.allowChat || S.isHost || S.cohost ? 'Введите сообщение… (Enter — отправить)' : 'Чат отключён организатором'}" ${S.allowChat || S.isHost || S.cohost ? '' : 'disabled'}></textarea><button class="btn-gradient" id="chatSend" style="padding:0 14px">${icon('send')}</button></div></div>`;
       }
       if (S.panel === 'polls') {
-        body = S.polls.length ? S.polls.map((p, i) => `<div class="poll" data-poll="${i}"><h4>${esc(p.q)}</h4>${p.opts.map((o, j) => { const total = p.votes.reduce((a, b) => a + b, 0) || 1; const pct = Math.round(p.votes[j] / total * 100); return `<div class="opt ${p.my === j ? 'voted' : ''}" data-vote="${j}"><div class="lbl"><span>${esc(o)}</span><span>${p.votes[j]} · ${pct}%</span></div><div class="bar"><i style="width:${pct}%"></i></div></div>`; }).join('')}<div class="poll-foot"><span>${p.votes.reduce((a, b) => a + b, 0)} голосов · ${p.anon ? 'анонимно' : 'открыто'} · ${p.open ? 'идёт' : 'завершён'}</span>${S.isHost ? `<button class="btn-ghost btn-sm" data-pollend="${i}">${p.open ? 'Завершить' : 'Поделиться итогами'}</button>` : ''}</div></div>`).join('') : `<div class="empty">${icon('poll')}Опросов пока нет${S.isHost ? '. Создайте первый — участники проголосуют прямо во встрече' : ''}</div>`;
-        foot = S.isHost ? `<button class="btn-gradient btn-sm" data-pa="newPoll">${icon('plus')} Создать опрос</button><button class="btn-ghost btn-sm" data-pa="quiz">${icon('sparkles')} Викторина по задаче</button>` : '';
+        const cnt = (p, j) => Object.values(p.votes || {}).filter(v => v === j).length, tot = p => Object.keys(p.votes || {}).length;
+        body = S.polls.length ? S.polls.map((p, i) => { const my = S.me ? p.votes[S.me.id] : null; return `<div class="poll" data-poll="${i}"><h4>${esc(p.q)}</h4>${p.opts.map((o, j) => { const total = tot(p) || 1; const pct = Math.round(cnt(p, j) / total * 100); return `<div class="opt ${my === j ? 'voted' : ''}" data-vote="${j}"><div class="lbl"><span>${esc(o)}</span><span>${cnt(p, j)} · ${pct}%</span></div><div class="bar"><i style="width:${pct}%"></i></div></div>`; }).join('')}<div class="poll-foot"><span>${tot(p)} голосов · ${p.anon ? 'анонимно' : 'открыто'} · ${p.open ? 'идёт' : 'завершён'}</span>${S.isHost || S.cohost ? `<button class="btn-ghost btn-sm" data-pollend="${i}">${p.open ? 'Завершить' : 'Поделиться итогами'}</button>` : ''}</div></div>`; }).join('') : `<div class="empty">${icon('poll')}Опросов пока нет${S.isHost || S.cohost ? '. Создайте первый — участники проголосуют прямо во встрече' : ''}</div>`;
+        foot = S.isHost || S.cohost ? `<button class="btn-gradient btn-sm" data-pa="newPoll">${icon('plus')} Создать опрос</button><button class="btn-ghost btn-sm" data-pa="quiz">${icon('sparkles')} Викторина по задаче</button>` : '';
       }
       if (S.panel === 'rooms') {
-        body = S.rooms.length ? S.rooms.map((r, i) => `<div class="br-room"><h4>${esc(r.name)} <span class="tag ${r.open ? 'ok' : ''}">${r.open ? 'открыт' : 'закрыт'}</span></h4><div class="members">${S.participants.filter(p => p.room === i + 1).map(p => `<span>${esc(p.name)}</span>`).join('') || '<span class="muted">пусто</span>'}</div><div style="display:flex;gap:6px;margin-top:8px"><button class="btn-ghost btn-sm" data-join="${i}">Войти</button>${S.isHost ? `<button class="btn-ghost btn-sm" data-bcast="${i}">Сообщение</button>` : ''}</div></div>`).join('') : `<div class="empty">${icon('split')}Сессионные залы не созданы${S.isHost ? '. Разделите участников на малые группы для работы над задачами' : ''}</div>`;
-        foot = S.isHost ? (S.rooms.length ? `<button class="btn-gradient btn-sm" data-pa="openRooms">${S.rooms[0].open ? 'Закрыть все залы' : 'Открыть все залы'}</button><button class="btn-ghost btn-sm" data-pa="recreate">${icon('split')} Пересоздать</button><button class="btn-ghost btn-sm" data-pa="bcastAll">${icon('bell')} Всем залам</button>` : `<button class="btn-gradient btn-sm" data-pa="createRooms">${icon('plus')} Создать залы</button>`) : '';
+        body = S.rooms.length ? S.rooms.map((r, i) => `<div class="br-room"><h4>${esc(r.name)} <span class="tag ${r.open ? 'ok' : ''}">${r.open ? 'открыт' : 'закрыт'}</span></h4><div class="members">${S.participants.filter(p => p.room === i + 1).map(p => `<span>${esc(p.name)}</span>`).join('') || '<span class="muted">пусто</span>'}</div><div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap">${S.isHost || S.cohost ? `<button class="btn-ghost btn-sm" data-bcast="${i}">Сообщение</button>${S.participants.filter(p => p.room !== i + 1).length ? `<select class="btn-ghost btn-sm" data-assign="${i}" style="max-width:160px"><option value="">Назначить участника…</option>${S.participants.filter(p => p.room !== i + 1).map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join('')}</select>` : ''}` : (S.myRoom === i + 1 ? '<span class="tag ok">вы здесь</span>' : '')}</div></div>`).join('') + `<p class="small muted" style="margin-top:10px">Залы — это распределение участников на группы: список видят все, а видео и звук остаются общими для встречи.</p>` : `<div class="empty">${icon('split')}Сессионные залы не созданы${S.isHost || S.cohost ? '. Разделите участников на малые группы для работы над задачами' : ''}</div>`;
+        foot = S.isHost || S.cohost ? (S.rooms.length ? `<button class="btn-gradient btn-sm" data-pa="openRooms">${S.rooms[0].open ? 'Закрыть все залы' : 'Открыть все залы'}</button><button class="btn-ghost btn-sm" data-pa="recreate">${icon('split')} Пересоздать</button><button class="btn-ghost btn-sm" data-pa="bcastAll">${icon('bell')} Всем залам</button>` : `<button class="btn-gradient btn-sm" data-pa="createRooms">${icon('plus')} Создать залы</button>`) : '';
       }
       sp.innerHTML = `<div class="side-head"><span>${tabs.find(t => t[0] === S.panel)[1]}</span><button class="btn-icon" data-close>${icon('x')}</button></div>
         <div class="side-tabs">${tabs.map(([k, l]) => `<button class="${S.panel === k ? 'active' : ''}" data-tab="${k}">${l.replace(/\s\(.*\)/, '')}</button>`).join('')}</div>
@@ -733,60 +978,57 @@
       sp.querySelectorAll('[data-tab]').forEach(b => b.addEventListener('click', () => { S.panel = b.dataset.tab; if (S.panel === 'chat') S.unread = 0; this.renderRoom(); }));
       sp.querySelectorAll('[data-pmenu]').forEach(b => b.addEventListener('click', () => this.participantMenu(b.dataset.pmenu, b)));
       sp.querySelectorAll('[data-admit]').forEach(b => b.addEventListener('click', () => this.admit(b.dataset.admit)));
-      sp.querySelectorAll('[data-deny]').forEach(b => b.addEventListener('click', () => { S.waiting = S.waiting.filter(w => w.id !== b.dataset.deny); toast('Участнику отказано во входе'); this.renderRoom(); }));
-      const aa = sp.querySelector('[data-admitall]'); aa && aa.addEventListener('click', () => [...S.waiting].forEach(w => this.admit(w.id)));
+      sp.querySelectorAll('[data-deny]').forEach(b => b.addEventListener('click', () => { RTC.send({ t: 'host', action: 'deny', target: b.dataset.deny }); S.waiting = S.waiting.filter(w => w.id !== b.dataset.deny); toast('Участнику отказано во входе'); this.renderRoom(); }));
+      const aa = sp.querySelector('[data-admitall]'); aa && aa.addEventListener('click', () => { RTC.send({ t: 'host', action: 'admitAll' }); toast('Все участники впущены', 'ok'); });
       sp.querySelectorAll('[data-pa]').forEach(b => b.addEventListener('click', () => this.panelAction(b.dataset.pa)));
-      sp.querySelectorAll('[data-vote]').forEach(o => o.addEventListener('click', () => { const pi = +o.closest('.poll').dataset.poll, j = +o.dataset.vote, p = S.polls[pi]; if (!p.open) return; if (p.my != null) p.votes[p.my]--; p.my = j; p.votes[j]++; this.renderPanel(); }));
-      sp.querySelectorAll('[data-pollend]').forEach(b => b.addEventListener('click', () => { const p = S.polls[+b.dataset.pollend]; if (p.open) { p.open = false; toast('Опрос завершён'); } else { S.chat.push({ sys: true, text: `Итоги опроса «${p.q}»: ` + p.opts.map((o, j) => `${o} — ${p.votes[j]}`).join(', ') }); toast('Итоги отправлены в чат', 'ok'); } this.renderPanel(); }));
-      sp.querySelectorAll('[data-join]').forEach(b => b.addEventListener('click', () => { const r = S.rooms[+b.dataset.join]; if (!r.open) return toast('Зал ещё не открыт', 'bad'); toast(`Вы перешли в «${r.name}». Нажмите «Выйти», чтобы вернуться в основной зал`, 'ok', 4000); S.topic = `${r.name} · ${S.topic.split(' · ').pop()}`; this.renderRoom(); }));
-      sp.querySelectorAll('[data-bcast]').forEach(b => b.addEventListener('click', () => { const t = prompt('Сообщение для зала'); if (t) toast('Сообщение отправлено в зал', 'ok'); }));
+      sp.querySelectorAll('[data-vote]').forEach(o => o.addEventListener('click', () => { const pi = +o.closest('.poll').dataset.poll, j = +o.dataset.vote, p = S.polls[pi]; if (!p.open) return toast('Опрос уже завершён', 'bad'); if (S.me) p.votes[S.me.id] = j; RTC.send({ t: 'poll', action: 'vote', id: p.id, opt: j }); this.renderPanel(); }));
+      sp.querySelectorAll('[data-pollend]').forEach(b => b.addEventListener('click', () => { const p = S.polls[+b.dataset.pollend]; if (p.open) { RTC.send({ t: 'poll', action: 'end', id: p.id }); toast('Опрос завершён'); } else { RTC.send({ t: 'poll', action: 'share', id: p.id }); toast('Итоги отправлены в чат', 'ok'); } }));
+      sp.querySelectorAll('[data-assign]').forEach(sel => sel.addEventListener('change', () => { if (sel.value) RTC.send({ t: 'rooms', action: 'assign', target: sel.value, room: +sel.dataset.assign + 1 }); }));
+      sp.querySelectorAll('[data-bcast]').forEach(b => b.addEventListener('click', () => { const t = prompt('Сообщение для зала'); if (t) { RTC.send({ t: 'rooms', action: 'bcast', room: +b.dataset.bcast + 1, text: t }); toast('Сообщение отправлено в зал', 'ok'); } }));
       if (S.panel === 'chat') this.bindChat(sp);
     },
     admit(id) {
-      const S = this.S; const w = S.waiting.find(x => x.id === id); if (!w) return;
-      S.waiting = S.waiting.filter(x => x !== w);
-      S.participants.push({ id: w.id, name: w.name, initials: w.initials, color: w.color, solid: SIM.solid[rnd(0, 7)], mic: !S.muteOnEntry, cam: Math.random() > .4, hand: false, speaking: false });
-      S.chat.push({ sys: true, text: `${w.name} присоединился к встрече` });
-      const al = this.layer.querySelector('.room-alert'); al && al.remove();
-      toast(`${w.name} впущен во встречу`, 'ok'); this.renderRoom();
+      const S = this.S; const w = S.waiting.find(x => x.id === id);
+      RTC.send({ t: 'host', action: 'admit', target: id });
+      S.waiting = S.waiting.filter(x => x.id !== id);
+      this.layer.querySelectorAll('.room-alert').forEach(al => al.remove());
+      if (w) toast(`${w.name} впущен во встречу`, 'ok'); this.renderRoom();
     },
     panelAction(a) {
       const S = this.S;
       if (a === 'invite') this.infoModal();
-      if (a === 'muteAll') { S.participants.forEach(p => p.mic = false); toast('Звук выключен у всех'); }
-      if (a === 'lowerAll') { S.participants.forEach(p => p.hand = false); S.hand = false; }
+      if (a === 'muteAll') { S.participants.forEach(p => p.mic = false); RTC.send({ t: 'host', action: 'muteAll' }); toast('Звук выключен у всех'); }
+      if (a === 'lowerAll') { S.participants.forEach(p => p.hand = false); S.hand = false; RTC.send({ t: 'host', action: 'lowerAll' }); this.sendState(); }
       if (a === 'newPoll') return this.pollModal();
-      if (a === 'quiz') { S.polls.unshift({ q: 'Задача 5: чему равен угол ∠BAC, если ∠BOC = 100°?', opts: ['40°', '50°', '80°', '100°'], votes: [0, 0, 0, 0], my: null, anon: false, open: true }); toast('Викторина запущена', 'ok'); this.simVotes(); }
+      if (a === 'quiz') return this.pollModal({ q: 'Задача 5: чему равен угол ∠BAC, если ∠BOC = 100°?', opts: ['40°', '50°', '80°', '100°'] });
       if (a === 'createRooms') return this.roomsModal();
       if (a === 'recreate') return this.roomsModal();
-      if (a === 'openRooms') { const open = !S.rooms[0].open; S.rooms.forEach(r => r.open = open); S.chat.push({ sys: true, text: open ? 'Сессионные залы открыты. Участники распределены' : 'Сессионные залы закрыты, все возвращаются в основной зал' }); if (!open) S.participants.forEach(p => p.room = null); toast(open ? 'Залы открыты' : 'Залы закрыты'); }
-      if (a === 'bcastAll') { const t = prompt('Сообщение всем залам'); if (t) { S.chat.push({ sys: true, text: `📢 Всем залам: ${t}` }); toast('Отправлено во все залы', 'ok'); } }
+      if (a === 'openRooms') { const open = !S.rooms[0].open; RTC.send({ t: 'rooms', action: 'open', open }); toast(open ? 'Залы открыты' : 'Залы закрыты'); }
+      if (a === 'bcastAll') { const t = prompt('Сообщение всем залам'); if (t) { RTC.send({ t: 'rooms', action: 'bcast', room: null, text: t }); toast('Отправлено во все залы', 'ok'); } }
       this.renderRoom();
     },
-    pollModal() {
+    pollModal(pre = {}) {
       const S = this.S;
-      App.modal('Новый опрос', `<label class="field">Вопрос<input type="text" id="pq" placeholder="Например: какой метод подходит для задачи 3?"></label>
-        <div id="popts" style="display:grid;gap:8px"><input type="text" placeholder="Вариант 1"><input type="text" placeholder="Вариант 2"></div>
+      App.modal('Новый опрос', `<label class="field">Вопрос<input type="text" id="pq" value="${esc(pre.q || '')}" placeholder="Например: какой метод подходит для задачи 3?"></label>
+        <div id="popts" style="display:grid;gap:8px">${(pre.opts || ['', '']).map((o, i) => `<input type="text" value="${esc(o)}" placeholder="Вариант ${i + 1}">`).join('')}</div>
         <button class="btn-ghost btn-sm" id="paddopt" type="button">${icon('plus')} Добавить вариант</button>
         <label class="check"><input type="checkbox" id="panon"> Анонимное голосование</label>`, [{ label: 'Отмена', cls: 'btn-ghost', act: 'close' }, { label: 'Запустить', cls: 'btn-gradient', act: 'ok' }], m => {
         $('#paddopt', m).addEventListener('click', () => { const i = document.createElement('input'); i.type = 'text'; i.placeholder = 'Вариант ' + ($('#popts', m).children.length + 1); $('#popts', m).appendChild(i); });
       }, () => {
         const q = $('#pq').value.trim(); const opts = [...$('#popts').querySelectorAll('input')].map(i => i.value.trim()).filter(Boolean);
         if (!q || opts.length < 2) return toast('Нужен вопрос и минимум два варианта', 'bad');
-        S.polls.unshift({ q, opts, votes: opts.map(() => 0), my: null, anon: $('#panon').checked, open: true });
-        S.chat.push({ sys: true, text: `Организатор запустил опрос: «${q}»` }); toast('Опрос запущен', 'ok'); this.simVotes(); this.renderRoom();
+        RTC.send({ t: 'poll', action: 'new', q, opts, anon: $('#panon').checked });
+        S.panel = 'polls'; toast('Опрос запущен', 'ok'); this.renderRoom();
       });
     },
-    simVotes() { /* голоса приходят только от реальных участников */ },
     roomsModal() {
       const S = this.S;
       App.modal('Сессионные залы', `<div class="field-row"><label class="field">Количество залов<input type="number" id="brN" value="2" min="1" max="10"></label><label class="field">Распределение<select id="brMode"><option value="auto">Автоматически</option><option value="manual">Вручную</option><option value="self">Участники выбирают сами</option></select></label></div>
         <div class="field-row"><label class="field">Автозакрытие через, мин<input type="number" id="brT" value="15" min="0"></label><label class="field">Обратный отсчёт при закрытии, сек<input type="number" id="brC" value="60" min="0"></label></div>
         <label class="check"><input type="checkbox" id="brRet" checked> Разрешить возврат в основной зал в любое время</label>`, [{ label: 'Отмена', cls: 'btn-ghost', act: 'close' }, { label: 'Создать', cls: 'btn-gradient', act: 'ok' }], null, () => {
         const n = Math.max(1, Math.min(10, +$('#brN').value || 2));
-        S.rooms = Array.from({ length: n }, (_, i) => ({ name: `Зал ${i + 1}`, open: false }));
-        if ($('#brMode').value === 'auto') S.participants.forEach((p, i) => p.room = (i % n) + 1); else S.participants.forEach(p => p.room = null);
-        toast(`Создано залов: ${n}`, 'ok'); this.renderRoom();
+        RTC.send({ t: 'rooms', action: 'create', rooms: Array.from({ length: n }, (_, i) => ({ name: `Зал ${i + 1}` })), mode: $('#brMode').value });
+        toast(`Создано залов: ${n}`, 'ok');
       });
     },
     bindChat(sp) {
@@ -796,21 +1038,17 @@
       const send = () => {
         const t = ta.value.trim(); if (!t) return;
         const to = S.chatTo, toP = S.participants.find(p => p.id === to);
+        if (to !== 'all' && !toP) { S.chatTo = 'all'; return toast('Этот участник уже вышел', 'bad'); }
         S.chat.push({ from: S.name, me: true, initials: App.user.initials, color: App.user.color, text: t, time: now(), to, toName: toP ? toP.name : '' });
+        RTC.send({ t: 'chat', text: t, to });
         ta.value = ''; this.renderPanel();
       };
       $('#chatSend', sp).addEventListener('click', send);
       ta && ta.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } });
-      $('#chatFile', sp).addEventListener('change', e => { const f = e.target.files[0]; if (f) { S.chat.push({ from: S.name, me: true, initials: App.user.initials, color: App.user.color, file: `${f.name} · ${(f.size / 1024).toFixed(0)} КБ`, time: now(), to: S.chatTo }); this.renderPanel(); } });
+      $('#chatFile', sp).addEventListener('change', e => { const f = e.target.files[0]; if (!f) return; if (f.size > 3 * 1048576) return toast('Файл больше 3 МБ — отправьте ссылку на него', 'bad', 4000); const rd = new FileReader(); rd.onload = () => { const label = `${f.name} · ${f.size >= 1048576 ? (f.size / 1048576).toFixed(1) + " МБ" : Math.max(1, Math.round(f.size / 1024)) + " КБ"}`; S.chat.push({ from: S.name, me: true, initials: App.user.initials, color: App.user.color, file: label, fileName: f.name, data: rd.result, time: now(), to: S.chatTo }); RTC.send({ t: 'chat', file: label, fileName: f.name, data: rd.result, to: S.chatTo }); this.renderPanel(); }; rd.readAsDataURL(f); });
       $('#chatEmoji', sp).addEventListener('click', e => { this.popover(e.currentTarget, `<div class="emoji-row">${['😀', '👍', '❤️', '🎉', '🤔', '👏', '🔥', '✅', '📐', '📏', '✏️', '🧮'].map(x => `<button data-e="${x}">${x}</button>`).join('')}</div>`, m => m.querySelectorAll('[data-e]').forEach(b => b.addEventListener('click', () => { ta.value += b.dataset.e; this.closePop(); ta.focus(); }))); e.currentTarget.closest('.chat-input').style.position = 'relative'; });
       ta && ta.focus();
     },
-    incomingChat(p, text, to = 'all', toName = '') {
-      const S = this.S;
-      S.chat.push({ from: p.name, initials: p.initials, color: p.color, text, time: now(), to, toName });
-      if (S.panel !== 'chat') { S.unread++; this.renderToolbar(); } else this.renderPanel();
-    },
-
     /* ---------- клавиатура ---------- */
     keys(e) {
       const S = this.S; if (!S || !S.joined || S.ended) return;
@@ -825,19 +1063,21 @@
     },
 
     /* =============== ВЫХОД =============== */
-    end(forAll) {
-      const S = this.S; S.ended = true;
+    end(forAll, remote) {
+      const S = this.S; if (S.ended) return; S.ended = true; S.joined = false;
+      if (!remote) { if (forAll) RTC.send({ t: 'host', action: 'end' }); RTC.close(); } else RTC.close();
+      Object.values(this.remoteVideos).forEach(v => v.remove()); this.remoteVideos = {}; this.audioSink.innerHTML = '';
       if (S.recording) this.stopRecording();
       if (S.displayStream) S.displayStream.getTracks().forEach(t => t.stop());
       if (S.rec) { S.rec.onend = null; try { S.rec.stop(); } catch (e) { } }
       this.timers.forEach(t => { clearInterval(t); clearTimeout(t); }); this.timers = [];
       document.onkeydown = null; document.onkeyup = null;
       if (S.wb) S.wb.destroy();
-      const mins = Math.max(1, Math.round(S.secs / 60));
+      try { if (location.hash.indexOf('#/join') === 0) history.replaceState(null, '', location.pathname + location.search + '#/home'); } catch (e) { }
       App.history.unshift({ topic: S.topic, date: new Date(), dur: fmtTime(S.secs), participants: S.participants.length + 1 });
       this.layer.innerHTML = `<div class="ended">
         <span class="avatar avatar-xl" style="background:var(--grad)">${icon('check')}</span>
-        <h2>${forAll ? 'Встреча завершена для всех' : 'Вы покинули встречу'}</h2>
+        <h2>${forAll ? 'Встреча завершена для всех' : S.endReason ? esc(S.endReason) : 'Вы покинули встречу'}</h2>
         <p class="muted">«${esc(S.topic)}» · ${fmtTime(S.secs)} · ${S.participants.length + 1} участник(ов)${App.recordings.length && App.recordings[0].blob ? ' · запись сохранена' : ''}</p>
         <p style="margin-top:10px;font-weight:700">Как прошла встреча?</p>
         <div class="stars">${[1, 2, 3, 4, 5].map(i => `<button data-star="${i}">⭐</button>`).join('')}</div>
@@ -853,7 +1093,8 @@
     },
     close() {
       const S = this.S;
-      if (S) { if (S.stream) S.stream.getTracks().forEach(t => t.stop()); if (S.displayStream) S.displayStream.getTracks().forEach(t => t.stop()); if (S.wb) S.wb.destroy(); if (S.audioCtx) S.audioCtx.close().catch(() => { }); }
+      RTC.close(); Object.values(this.remoteVideos || {}).forEach(v => v.remove()); this.remoteVideos = {}; if (this.audioSink) this.audioSink.innerHTML = '';
+      if (S) { if (S.stream) S.stream.getTracks().forEach(t => t.stop()); if (S.displayStream) S.displayStream.getTracks().forEach(t => t.stop()); if (S.wb) S.wb.destroy(); if (S.annotWb) S.annotWb.destroy(); if (S.rec) { S.rec.onend = null; try { S.rec.stop(); } catch (e) { } } if (S.audioCtx) S.audioCtx.close().catch(() => { }); }
       this.timers.forEach(t => { clearInterval(t); clearTimeout(t); }); this.timers = [];
       document.onkeydown = null; document.onkeyup = null;
       this.layer.classList.add('hidden'); this.layer.innerHTML = '';
