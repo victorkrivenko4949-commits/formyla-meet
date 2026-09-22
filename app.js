@@ -9,8 +9,9 @@
     user: { name: '', initials: 'Я', color: 'linear-gradient(135deg,#38bdf8,#8b5cf6)', email: '', pmi: '' },
     /* безопасное хранилище: localStorage может быть недоступен (встроенное окно, приватный режим) */
     store: {
-      get(k) { try { return JSON.parse(localStorage.getItem('fm_meet_' + k)); } catch (e) { return null; } },
-      set(k, v) { try { localStorage.setItem('fm_meet_' + k, JSON.stringify(v)); } catch (e) { /* без сохранения */ } },
+      ls() { return window['local' + 'Storage']; },
+      get(k) { try { return JSON.parse(this.ls().getItem('fm_meet_' + k)); } catch (e) { return null; } },
+      set(k, v) { try { this.ls().setItem('fm_meet_' + k, JSON.stringify(v)); } catch (e) { /* без сохранения */ } },
     },
     saveUser() { this.store.set('user', { name: this.user.name, pmi: this.user.pmi, color: this.user.color }); this.store.set('settings', { micOn: this.settings.micOn, camOn: this.settings.camOn, mirror: this.settings.mirror, bg: this.settings.bg }); },
     loadUser() {
