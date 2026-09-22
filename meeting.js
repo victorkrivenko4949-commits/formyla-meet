@@ -80,6 +80,7 @@
 
     renderPrejoin() {
       const S = this.S;
+      this.layer.classList.add('prejoin-mode');
       this.layer.innerHTML = `
         <div class="room-top"><div class="left"><span class="room-title">${icon('shield')} ${esc(S.topic)}</span><span class="tag">ID ${S.id}</span></div>
         <div class="right"><button class="btn-ghost btn-sm" data-a="cancel">${icon('x')} Отмена</button></div></div>
@@ -103,7 +104,7 @@
               <div><div class="small muted" style="margin-bottom:6px">Уровень микрофона</div><div class="level-meter"><i></i></div></div>
               <label class="check"><input type="checkbox" id="pjRemember" checked> Запомнить настройки микрофона и камеры</label>
               <label class="check"><input type="checkbox" id="pjAudio" checked> Подключиться со звуком компьютера</label>
-              <div style="display:flex;gap:10px;flex-wrap:wrap">
+              <div class="prejoin-actions">
                 <button class="btn-gradient" data-a="join" style="padding:13px 30px;font-size:15px">${S.isHost ? 'Начать встречу' : 'Подключиться'}</button>
                 <button class="btn-ghost" data-a="copy">${icon('copy')} Скопировать приглашение</button>
               </div>
@@ -178,6 +179,7 @@
 
     renderRoom() {
       const S = this.S;
+      this.layer.classList.remove('prejoin-mode');
       this.layer.innerHTML = `
         <div class="room">
           <div class="room-top">
