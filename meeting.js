@@ -30,13 +30,38 @@
       await this.getMedia();
     },
 
-    async getMedia() {
-      const S = this.S;
+    /* Доступ к устройствам — инкрементально: включение камеры не перезапускает микрофон и наоборот
+       (перезапуск всего сразу на реальных устройствах даёт чёрный кадр, а иногда и ошибку «устройство занято»).
+       getMedia({ force: true }) — полный перезапуск (смена устройства, HD, шумоподавление). */
+    async getMedia(opts) {
+      const S = this.S; const force = !!(opts && opts.force);
+      const live = (kind) => S.stream ? S.stream.getTracks().filter(t => t.kind === kind && t.readyState === 'live') : [];
+      const needAudio = S.mic || !S.joined, needVideo = !!S.cam;
+      const aCons = { echoCancellation: true, noiseSuppression: S.noise, deviceId: App.settings.micId ? { exact: App.settings.micId } : undefined };
+      const vCons = { width: { ideal: S.hd ? 1280 : 640 }, height: { ideal: S.hd ? 720 : 360 }, deviceId: App.settings.camId ? { exact: App.settings.camId } : undefined };
       try {
-        if (S.stream) S.stream.getTracks().forEach(t => t.stop());
-        const constraints = { video: S.cam ? { width: { ideal: S.hd ? 1280 : 640 }, height: { ideal: S.hd ? 720 : 360 }, deviceId: App.settings.camId ? { exact: App.settings.camId } : undefined } : false, audio: S.mic || !S.joined ? { echoCancellation: true, noiseSuppression: S.noise, deviceId: App.settings.micId ? { exact: App.settings.micId } : undefined } : false };
-        if (!constraints.video && !constraints.audio) { S.stream = null; this.attachSelf(); RTC.setLocalStream(null); return; }
-        S.stream = await navigator.mediaDevices.getUserMedia(constraints);
+        if (force && S.stream) { S.stream.getTracks().forEach(t => t.stop()); S.stream = null; }
+        if (!S.stream) S.stream = new MediaStream();
+        // убрать лишнее
+        if (!needVideo) live('video').forEach(t => { t.stop(); S.stream.removeTrack(t); });
+        S.stream.getTracks().filter(t => t.readyState === 'ended').forEach(t => S.stream.removeTrack(t));
+        // добрать недостающее (аудио-дорожку после входа не выбрасываем — микрофон просто выключается)
+        const want = {};
+        if (needAudio && !live('audio').length) want.audio = aCons;
+        if (needVideo && !live('video').length) want.video = vCons;
+        if (want.audio || want.video) {
+          let got;
+          try { got = await navigator.mediaDevices.getUserMedia(want); }
+          catch (e) {
+            // точное устройство недоступно (сохранённый id устарел) — пробуем любое
+            if ((e.name === 'OverconstrainedError' || e.name === 'NotFoundError') && ((want.audio && want.audio.deviceId) || (want.video && want.video.deviceId))) {
+              if (want.audio) delete want.audio.deviceId; if (want.video) delete want.video.deviceId; App.settings.micId = ''; App.settings.camId = ''; App.saveSettings && App.saveSettings();
+              got = await navigator.mediaDevices.getUserMedia(want);
+            } else throw e;
+          }
+          got.getTracks().forEach(t => S.stream.addTrack(t));
+        }
+        if (!S.stream.getTracks().length) { S.stream = null; this.attachSelf(); RTC.setLocalStream(null); return; }
         S.stream.getAudioTracks().forEach(t => t.enabled = S.mic);
         S.mediaError = null; S.permState = 'granted';
         RTC.setLocalStream(S.stream);
@@ -44,10 +69,14 @@
         this.startLevelMeter();
         App.refreshDevices && App.refreshDevices();
       } catch (e) {
-        S.stream = null; S.mediaError = e.name; S.permState = (e.name === 'NotAllowedError' || e.name === 'SecurityError') ? 'denied' : 'error';
-        RTC.setLocalStream(null);
+        if (!S.stream || !S.stream.getTracks().length) S.stream = null;
+        S.mediaError = e.name; S.permState = (e.name === 'NotAllowedError' || e.name === 'SecurityError') ? 'denied' : 'error';
+        if (!S.stream) RTC.setLocalStream(null); else { S.stream.getAudioTracks().forEach(t => t.enabled = S.mic); RTC.setLocalStream(S.stream); }
+        if (S.cam && !live('video').length) S.cam = false;
         this.attachSelf(); this.renderPermBox();
         if (e.name === 'NotFoundError') toast('Камера или микрофон не найдены', 'bad');
+        else if (e.name === 'NotReadableError' || e.name === 'AbortError') toast('Устройство занято другим приложением или вкладкой', 'bad');
+        else if (e.name === 'NotAllowedError') toast('Доступ к камере или микрофону запрещён в браузере', 'bad');
       }
     },
 
@@ -224,10 +253,10 @@
       RTC.on('peer', p => { if (!S.joined) return; if (!S.participants.find(x => x.id === p.id)) S.participants.push(this.mkPeer(p)); const al = this.layer.querySelector('.room-alert'); al && al.remove(); toast(`${p.name} присоединился`, 'ok'); this.renderRoom(); });
       RTC.on('left', m => { if (!S.joined) return; const p = S.participants.find(x => x.id === m.id); S.participants = S.participants.filter(x => x.id !== m.id); if (this.remoteVideos[m.id]) { this.remoteVideos[m.id].remove(); delete this.remoteVideos[m.id]; } const au = this.audioSink.querySelector(`[data-aid="${m.id}"]`); au && au.remove(); if (S.sharing === m.id) { S.sharing = null; this.closeAnnotations(); } const sau = this.audioSink.querySelector(`[data-aid="screen:${m.id}"]`); sau && sau.remove(); if (S.pinned === m.id) S.pinned = null; if (S.spotlight === m.id) S.spotlight = null; if (m.newHost) { if (S.me && m.newHost === S.me.id) { S.isHost = true; toast('Организатор вышел — теперь вы организатор встречи', 'ok', 5000); } else { const h = S.participants.find(x => x.id === m.newHost); if (h) { h.host = true; } } } if (p && m.reason !== 'waiting') toast(`${p.name} покинул встречу`); this.renderRoom(); });
       RTC.on('peers', m => { if (!S.joined) return; const map = new Map(S.participants.map(p => [p.id, p])); S.participants = m.peers.filter(p => p.id !== S.me.id).map(p => Object.assign(map.get(p.id) || this.mkPeer(p), p)); const meP = m.peers.find(p => p.id === S.me.id); if (meP) { S.isHost = !!meP.host; S.cohost = !!meP.cohost; } this.renderRoom(); });
-      RTC.on('state', m => { if (!S.joined || !S.me) return; if (m.id === S.me.id) { if (S.sharing === 'me' && !m.peer.sharing) this.stopShare(true); return; } const p = S.participants.find(x => x.id === m.id); if (p) Object.assign(p, m.peer, { stream: p.stream }); const prevShare = S.sharing; S.sharing = m.sharingId ? (m.sharingId === S.me.id ? 'me' : m.sharingId) : null; if (S.sharing && S.sharing !== 'me' && S.sharing !== prevShare) { S.wbShared = false; S.view = 'speaker'; if (S.wb) { S.wb.destroy(); S.wb = null; } S.annot = false; toast(`${this.peerName(S.sharing)} демонстрирует экран`); } if (!S.sharing && prevShare && prevShare !== 'me') this.closeAnnotations(); this.renderRoom(); });
+      RTC.on('state', m => { if (!S.joined || !S.me) return; if (m.id === S.me.id) { if (S.sharing === 'me' && !m.peer.sharing) this.stopShare(true); return; } const p = S.participants.find(x => x.id === m.id); if (p) { Object.assign(p, m.peer, { stream: p.stream }); if (!m.peer.cam) p.camLive = false; } const prevShare = S.sharing; S.sharing = m.sharingId ? (m.sharingId === S.me.id ? 'me' : m.sharingId) : null; if (S.sharing && S.sharing !== 'me' && S.sharing !== prevShare) { S.wbShared = false; S.view = 'speaker'; if (S.wb) { S.wb.destroy(); S.wb = null; } S.annot = false; toast(`${this.peerName(S.sharing)} демонстрирует экран`); } if (!S.sharing && prevShare && prevShare !== 'me') this.closeAnnotations(); this.renderRoom(); });
       RTC.on('track', m => { if (!S.joined) return; const p = S.participants.find(x => x.id === m.id); if (p) p.stream = m.stream; if (m.kind === 'audio') { this.attachAudio(m.id, m.stream); if (S.recMix && S.recMix.add) S.recMix.add(m.stream); } this.renderStage(); });
       RTC.on('screenTrack', m => { if (!S.joined) return; if (m.kind === 'audio' && S.sharing === m.id) this.attachScreenAudio(m.id, m.stream); if (S.sharing === m.id) this.renderStage(); });
-      RTC.on('trackchange', m => { if (S.joined) this.renderStage(); });
+      RTC.on('trackchange', m => { if (!S.joined) return; const p = S.participants.find(x => x.id === m.id); if (p && m.kind === 'video') p.camLive = m.live; /* кадры камеры реально идут — надёжный признак включённой камеры */ this.renderStage(); });
       RTC.on('conn', m => {
         const p = S.participants.find(x => x.id === m.id); if (!p) return;
         p.poor = m.state === 'disconnected' || m.state === 'failed' || m.state === 'checking';
@@ -265,7 +294,7 @@
         }
       });
     },
-    sendState() { const S = this.S; if (!S || !S.joined) return; RTC.send({ t: 'state', mic: S.mic && !!(S.stream && S.stream.getAudioTracks().length), cam: S.cam && !!(S.stream && S.stream.getVideoTracks().length), hand: S.hand, sharing: S.sharing === 'me', name: S.name }); },
+    sendState() { const S = this.S; if (!S || !S.joined) return; RTC.send({ t: 'state', mic: S.mic && !!(S.stream && S.stream.getAudioTracks().some(t => t.readyState === 'live')), cam: S.cam && !!(S.stream && S.stream.getVideoTracks().some(t => t.readyState === 'live')), hand: S.hand, sharing: S.sharing === 'me', name: S.name }); },
     applyRooms(rooms, members) { const S = this.S; S.rooms = (rooms || []).map((r, i) => ({ id: i + 1, name: r.name, open: r.open })); if (members) { const map = new Map(members); S.participants.forEach(p => { p.room = map.get(p.id) || null; }); S.myRoom = S.me ? map.get(S.me.id) || null : null; } if (S.rooms.length && S.rooms[0].open && S.myRoom && !S.isHost) toast(`Организатор открыл сессионные залы. Вы распределены в «${(S.rooms[S.myRoom - 1] || {}).name || 'Зал ' + S.myRoom}»`, 'info', 6000); },
     playKnock() { try { const ctx = new (window.AudioContext || window.webkitAudioContext)(); const o = ctx.createOscillator(); const g = ctx.createGain(); o.connect(g); g.connect(ctx.destination); o.frequency.value = 660; g.gain.value = .08; o.start(); setTimeout(() => { o.frequency.value = 880; }, 160); setTimeout(() => { o.stop(); ctx.close(); }, 380); } catch (e) { } },
     fromChat(c) { const S = this.S; const time = typeof c.time === 'number' ? new Date(c.time).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }) : (c.time || now()); c = Object.assign({}, c, { time }); if (c.sys) return { sys: true, text: c.text, time: c.time }; const me = S.me && c.from === S.me.id; return { from: c.name, me, initials: c.initials, color: c.color, text: c.text, file: c.file, fileName: c.fileName, data: c.data, time: c.time, to: c.to, toName: c.to && c.to !== 'all' ? (me ? c.toName : 'вам') : '' }; },
@@ -387,7 +416,7 @@
       const all = [{ id: 'me', name: S.name + ' (Вы)', initials: App.user.initials, color: App.user.color, mic: S.mic, cam: S.cam && !!(S.stream && S.stream.getVideoTracks().length), hand: S.hand, host: S.isHost, cohost: S.cohost, me: true, pinned: S.pinned === 'me', spotlight: S.spotlight === 'me', room: S.myRoom }, ...S.participants];
       const tile = (p, extra = '') => `
         <div class="tile-v ${p.speaking ? 'speaking' : ''} ${p.pinned ? 'pinned' : ''} ${p.hand ? 'has-hand' : ''}" data-id="${p.id}" ${extra}>
-          ${p.me ? `<div data-self-video style="position:absolute;inset:0"></div>` : (p.cam && p.stream && p.stream.getVideoTracks().some(t => t.readyState === 'live') ? `<div data-remote-video="${p.id}" style="position:absolute;inset:0"></div>` : `<div class="avatar-wrap"><span class="avatar avatar-lg" style="background:${p.color};${p.cam ? '' : 'filter:grayscale(.4)'}">${p.initials}</span></div>`)}
+          ${p.me ? `<div data-self-video style="position:absolute;inset:0"></div>` : ((p.cam || p.camLive) && p.stream && p.stream.getVideoTracks().some(t => t.readyState === 'live') ? `<div data-remote-video="${p.id}" style="position:absolute;inset:0"></div>` : `<div class="avatar-wrap"><span class="avatar avatar-lg" style="background:${p.color};${p.cam ? '' : 'filter:grayscale(.4)'}">${p.initials}</span></div>`)}
           <div class="badges">${p.host ? `<span class="badge">${icon('crown')} Организатор</span>` : ''}${p.cohost ? `<span class="badge">Соорганизатор</span>` : ''}${p.spotlight ? `<span class="badge">${icon('star')} В центре</span>` : ''}${p.pinned ? `<span class="badge">${icon('pin')}</span>` : ''}${p.room ? `<span class="badge">Зал ${p.room}</span>` : ''}</div>
           ${p.hand ? `<span class="hand" title="Поднята рука">✋</span>` : ''}
           <div class="tile-menu">
@@ -508,7 +537,7 @@
       const S = this.S;
       const [act, arg] = a.split(':');
       switch (act) {
-        case 'mic': if (!S.mic && !S.isHost && !S.cohost && S.allowUnmute === false) { toast('Организатор запретил включать микрофон', 'bad'); return; } S.mic = !S.mic; if (S.stream) S.stream.getAudioTracks().forEach(t => t.enabled = S.mic); if (S.mic && !(S.stream && S.stream.getAudioTracks().length)) this.getMedia().then(() => this.sendState()); toast(S.mic ? 'Микрофон включён' : 'Микрофон выключен'); this.sendState(); break;
+        case 'mic': if (!S.mic && !S.isHost && !S.cohost && S.allowUnmute === false) { toast('Организатор запретил включать микрофон', 'bad'); return; } S.mic = !S.mic; if (S.stream) S.stream.getAudioTracks().forEach(t => t.enabled = S.mic); if (S.mic && !(S.stream && S.stream.getAudioTracks().some(t => t.readyState === 'live'))) this.getMedia().then(() => { this.sendState(); this.renderToolbar && this.renderToolbar(); }); toast(S.mic ? 'Микрофон включён' : 'Микрофон выключен'); this.sendState(); break;
         case 'cam': S.cam = !S.cam; this.getMedia().then(() => { this.sendState(); this.renderStage(); }); break;
         case 'micMenu': return this.micMenu(btn);
         case 'camMenu': return this.camMenu(btn);
@@ -574,10 +603,10 @@
         <button data-o="test">${icon('volume')} Проверить динамик и микрофон</button>
         <button data-o="leaveAudio">${icon('phone')} Отключить звук компьютера</button>
         <button data-o="settings">${icon('settings')} Настройки звука…</button>`, m => {
-        m.querySelectorAll('[data-dev]').forEach(b => b.addEventListener('click', () => { const [k, id] = b.dataset.dev.split(':'); if (k === 'mic') { App.settings.micId = id; this.getMedia(); } else App.settings.spkId = id; toast('Устройство переключено', 'ok'); this.closePop(); }));
+        m.querySelectorAll('[data-dev]').forEach(b => b.addEventListener('click', () => { const [k, id] = b.dataset.dev.split(':'); if (k === 'mic') { App.settings.micId = id; this.getMedia({ force: true }); } else App.settings.spkId = id; toast('Устройство переключено', 'ok'); this.closePop(); }));
         m.querySelectorAll('[data-o]').forEach(b => b.addEventListener('click', () => {
           const o = b.dataset.o; this.closePop();
-          if (o === 'noise') { S.noise = !S.noise; this.getMedia(); toast(S.noise ? 'Подавление шума включено' : 'Подавление шума выключено'); }
+          if (o === 'noise') { S.noise = !S.noise; this.getMedia({ force: true }); toast(S.noise ? 'Подавление шума включено' : 'Подавление шума выключено'); }
           if (o === 'test') this.testAudio();
           if (o === 'leaveAudio') { S.mic = false; if (S.stream) S.stream.getAudioTracks().forEach(t => t.stop()); toast('Звук компьютера отключён'); this.renderToolbar(); this.renderStage(); }
           if (o === 'settings') App.openSettingsModal('audio');
@@ -602,12 +631,12 @@
         <button data-o="mirror" class="${S.mirror ? 'checked' : ''}">${icon(S.mirror ? 'check' : 'layout')} Зеркальное отображение</button>
         <button data-o="hd" class="${S.hd ? 'checked' : ''}">${icon(S.hd ? 'check' : 'video')} HD-видео (720p)</button>
         <button data-o="settings">${icon('settings')} Настройки видео…</button>`, m => {
-        m.querySelectorAll('[data-cam]').forEach(b => b.addEventListener('click', () => { App.settings.camId = b.dataset.cam; this.getMedia(); this.closePop(); toast('Камера переключена', 'ok'); }));
+        m.querySelectorAll('[data-cam]').forEach(b => b.addEventListener('click', () => { App.settings.camId = b.dataset.cam; this.getMedia({ force: true }); this.closePop(); toast('Камера переключена', 'ok'); }));
         m.querySelectorAll('[data-o]').forEach(b => b.addEventListener('click', () => {
           const o = b.dataset.o; this.closePop();
           if (o === 'bg') this.bgModal();
           if (o === 'mirror') { S.mirror = !S.mirror; App.settings.mirror = S.mirror; this.attachSelf(); }
-          if (o === 'hd') { S.hd = !S.hd; this.getMedia(); toast(S.hd ? 'HD включено' : 'HD выключено'); }
+          if (o === 'hd') { S.hd = !S.hd; this.getMedia({ force: true }); toast(S.hd ? 'HD включено' : 'HD выключено'); }
           if (o === 'settings') App.openSettingsModal('video');
         }));
       });
@@ -1090,7 +1119,13 @@
         const a = map[k] || map[ru[k]]; if (a) { e.preventDefault(); this.action(a); }
       }
       if (e.key === 'Escape') { this.closePop(); this.layer.classList.remove('focus-mode'); if (S.panel) { S.panel = null; this.renderRoom(); } }
-      if (e.code === 'Space' && !S.mic && !e.repeat) { S.ptt = true; if (S.stream) S.stream.getAudioTracks().forEach(t => t.enabled = true); toast('Микрофон включён, пока удерживаете пробел'); document.onkeyup = ev => { if (ev.code === 'Space' && S.ptt) { S.ptt = false; if (S.stream) S.stream.getAudioTracks().forEach(t => t.enabled = false); } }; }
+      if (e.code === 'Space' && !S.mic && !e.repeat && !e.target.closest('button, a, select, [role="button"]') && S.stream && S.stream.getAudioTracks().length) {
+        e.preventDefault(); S.ptt = true; S.stream.getAudioTracks().forEach(t => t.enabled = true); toast('Микрофон включён, пока удерживаете пробел');
+        const release = () => { if (!S.ptt) return; S.ptt = false; if (S.stream && !S.mic) S.stream.getAudioTracks().forEach(t => t.enabled = false); document.removeEventListener('keyup', onUp); window.removeEventListener('blur', release); document.removeEventListener('visibilitychange', release); };
+        const onUp = ev => { if (ev.code === 'Space') release(); };
+        document.addEventListener('keyup', onUp); window.addEventListener('blur', release); document.addEventListener('visibilitychange', release);
+        setTimeout(release, 30000);
+      }
     },
 
     /* =============== ВЫХОД =============== */

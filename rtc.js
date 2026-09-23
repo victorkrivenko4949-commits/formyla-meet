@@ -59,8 +59,21 @@
       const a = this.localStream ? this.localStream.getAudioTracks()[0] || null : null;
       const v = this.localStream ? this.localStream.getVideoTracks()[0] || null : null;
       const T = pc.getTransceivers(); const at = T.find(t => t.__kind === 'audio'), vt = T.find(t => t.__kind === 'video'), st = T.find(t => t.__kind === 'screen'), sa = T.find(t => t.__kind === 'screenAudio');
-      const rep = (tr, track) => { if (tr && tr.sender && tr.sender.track !== track) tr.sender.replaceTrack(track).catch(() => { }); };
+      let fresh = false;
+      const rep = (tr, track) => { if (tr && tr.sender && tr.sender.track !== track) { if (track && !tr.sender.track) fresh = true; tr.sender.replaceTrack(track).catch(() => { }); } };
       rep(at, a); rep(vt, v); rep(st, this.screenTrack); rep(sa, this.screenAudio);
+      // Дорожка появилась там, где при согласовании её не было (вход с выключенной камерой/микрофоном):
+      // повторно согласуем сессию, чтобы у собеседника (в т.ч. Safari/Firefox) дорожка точно заиграла.
+      if (fresh && pc.remoteDescription) this.renegotiate(pc);
+    },
+
+    renegotiate(pc) {
+      if (pc.signalingState !== 'stable' || pc.__makingOffer) { pc.__renegoPending = true; return; }
+      pc.__renegoPending = false;
+      (async () => {
+        try { pc.__makingOffer = true; await pc.setLocalDescription(); this.send({ t: 'signal', to: pc.__id, data: { description: pc.localDescription } }); }
+        catch (e) { console.warn('renegotiate', e); } finally { pc.__makingOffer = false; }
+      })();
     },
 
     /* ---------- WebRTC (perfect negotiation) ---------- */
@@ -91,6 +104,7 @@
         try { pc.__makingOffer = true; await pc.setLocalDescription(); this.send({ t: 'signal', to: id, data: { description: pc.localDescription } }); }
         catch (e) { console.warn('offer', e); } finally { pc.__makingOffer = false; }
       };
+      pc.onsignalingstatechange = () => { if (pc.signalingState === 'stable' && pc.__renegoPending) setTimeout(() => this.renegotiate(pc), 50); };
       pc.__restarts = 0;
       pc.oniceconnectionstatechange = () => {
         if (pc.iceConnectionState === 'failed' && pc.__restarts < 2) { pc.__restarts++; try { pc.restartIce(); } catch (e) { } }
@@ -110,7 +124,7 @@
           await pc.setRemoteDescription(data.description);
           // разметить трансиверы по mid и подставить свои дорожки (для отвечающей стороны — при первом предложении)
           pc.getTransceivers().forEach(t => { if (!t.__kind) { t.__kind = { '0': 'audio', '1': 'video', '2': 'screen', '3': 'screenAudio' }[t.mid] || null; if (t.__kind) { try { t.direction = 'sendrecv'; } catch (e) { } } } });
-          this.syncSenders(pc);
+          this.syncSenders(pc); pc.__renegoPending = false; // дорожки уже попадут в этот ответ
           while (pc.__cands.length) { const c = pc.__cands.shift(); try { await pc.addIceCandidate(c); } catch (e) { console.warn('cand', e); } }
           if (data.description.type === 'offer') { await pc.setLocalDescription(); this.send({ t: 'signal', to: from, data: { description: pc.localDescription } }); }
         } else if (data.candidate) {
