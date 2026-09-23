@@ -12,7 +12,7 @@
   }
 
   const RTC = {
-    ws: null, me: null, peers: new Map(), handlers: {}, localStream: null, screenTrack: null, connected: false, pending: [],
+    ws: null, me: null, peers: new Map(), handlers: {}, localStream: null, screenTrack: null, screenAudio: null, connected: false, pending: [],
 
     on(t, fn) { this.handlers[t] = fn; return this; },
     emit(t, m) { const fn = this.handlers[t]; if (fn) try { fn(m); } catch (e) { console.error('RTC handler', t, e); } },
@@ -51,16 +51,16 @@
       this.localStream = stream;
       for (const pc of this.peers.values()) this.syncSenders(pc);
     },
-    setScreenTrack(track) {
-      this.screenTrack = track || null;
+    setScreenTrack(track, audioTrack) {
+      this.screenTrack = track || null; this.screenAudio = audioTrack || null;
       for (const pc of this.peers.values()) this.syncSenders(pc);
     },
     syncSenders(pc) {
       const a = this.localStream ? this.localStream.getAudioTracks()[0] || null : null;
       const v = this.localStream ? this.localStream.getVideoTracks()[0] || null : null;
-      const at = pc.getTransceivers().find(t => t.__kind === 'audio'), vt = pc.getTransceivers().find(t => t.__kind === 'video'), st = pc.getTransceivers().find(t => t.__kind === 'screen');
+      const T = pc.getTransceivers(); const at = T.find(t => t.__kind === 'audio'), vt = T.find(t => t.__kind === 'video'), st = T.find(t => t.__kind === 'screen'), sa = T.find(t => t.__kind === 'screenAudio');
       const rep = (tr, track) => { if (tr && tr.sender && tr.sender.track !== track) tr.sender.replaceTrack(track).catch(() => { }); };
-      rep(at, a); rep(vt, v); rep(st, this.screenTrack);
+      rep(at, a); rep(vt, v); rep(st, this.screenTrack); rep(sa, this.screenAudio);
     },
 
     /* ---------- WebRTC (perfect negotiation) ---------- */
@@ -75,11 +75,12 @@
         const ta = pc.addTransceiver('audio', { direction: 'sendrecv' }); ta.__kind = 'audio';
         const tv = pc.addTransceiver('video', { direction: 'sendrecv' }); tv.__kind = 'video';
         const ts = pc.addTransceiver('video', { direction: 'sendrecv' }); ts.__kind = 'screen';
+        const tsa = pc.addTransceiver('audio', { direction: 'sendrecv' }); tsa.__kind = 'screenAudio';
         this.syncSenders(pc);
       }
       pc.ontrack = e => {
-        const isScreen = e.transceiver.mid === '2';
-        if (isScreen) { pc.__screen.addTrack(e.track); this.emit('screenTrack', { id, stream: pc.__screen, track: e.track }); }
+        const isScreen = e.transceiver.mid === '2' || e.transceiver.mid === '3';
+        if (isScreen) { pc.__screen.addTrack(e.track); this.emit('screenTrack', { id, stream: pc.__screen, track: e.track, kind: e.track.kind }); }
         else { pc.__stream.addTrack(e.track); this.emit('track', { id, stream: pc.__stream, kind: e.track.kind }); }
         e.track.onunmute = () => this.emit('trackchange', { id, kind: isScreen ? 'screen' : e.track.kind, live: true });
         e.track.onmute = () => this.emit('trackchange', { id, kind: isScreen ? 'screen' : e.track.kind, live: false });
@@ -108,7 +109,7 @@
           if (pc.__ignoreOffer) return;
           await pc.setRemoteDescription(data.description);
           // разметить трансиверы по mid и подставить свои дорожки (для отвечающей стороны — при первом предложении)
-          pc.getTransceivers().forEach(t => { if (!t.__kind) { t.__kind = { '0': 'audio', '1': 'video', '2': 'screen' }[t.mid] || null; if (t.__kind) { try { t.direction = 'sendrecv'; } catch (e) { } } } });
+          pc.getTransceivers().forEach(t => { if (!t.__kind) { t.__kind = { '0': 'audio', '1': 'video', '2': 'screen', '3': 'screenAudio' }[t.mid] || null; if (t.__kind) { try { t.direction = 'sendrecv'; } catch (e) { } } } });
           this.syncSenders(pc);
           while (pc.__cands.length) { const c = pc.__cands.shift(); try { await pc.addIceCandidate(c); } catch (e) { console.warn('cand', e); } }
           if (data.description.type === 'offer') { await pc.setLocalDescription(); this.send({ t: 'signal', to: from, data: { description: pc.localDescription } }); }

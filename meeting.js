@@ -222,11 +222,11 @@
         toast(S.isHost ? `Встреча «${S.topic}» началась. Пригласите участников по ссылке` : `Вы во встрече «${S.topic}»`, 'ok');
       });
       RTC.on('peer', p => { if (!S.joined) return; if (!S.participants.find(x => x.id === p.id)) S.participants.push(this.mkPeer(p)); const al = this.layer.querySelector('.room-alert'); al && al.remove(); toast(`${p.name} присоединился`, 'ok'); this.renderRoom(); });
-      RTC.on('left', m => { if (!S.joined) return; const p = S.participants.find(x => x.id === m.id); S.participants = S.participants.filter(x => x.id !== m.id); if (this.remoteVideos[m.id]) { this.remoteVideos[m.id].remove(); delete this.remoteVideos[m.id]; } const au = this.audioSink.querySelector(`[data-aid="${m.id}"]`); au && au.remove(); if (S.sharing === m.id) { S.sharing = null; this.closeAnnotations(); } if (S.pinned === m.id) S.pinned = null; if (S.spotlight === m.id) S.spotlight = null; if (m.newHost) { if (S.me && m.newHost === S.me.id) { S.isHost = true; toast('Организатор вышел — теперь вы организатор встречи', 'ok', 5000); } else { const h = S.participants.find(x => x.id === m.newHost); if (h) { h.host = true; } } } if (p && m.reason !== 'waiting') toast(`${p.name} покинул встречу`); this.renderRoom(); });
+      RTC.on('left', m => { if (!S.joined) return; const p = S.participants.find(x => x.id === m.id); S.participants = S.participants.filter(x => x.id !== m.id); if (this.remoteVideos[m.id]) { this.remoteVideos[m.id].remove(); delete this.remoteVideos[m.id]; } const au = this.audioSink.querySelector(`[data-aid="${m.id}"]`); au && au.remove(); if (S.sharing === m.id) { S.sharing = null; this.closeAnnotations(); } const sau = this.audioSink.querySelector(`[data-aid="screen:${m.id}"]`); sau && sau.remove(); if (S.pinned === m.id) S.pinned = null; if (S.spotlight === m.id) S.spotlight = null; if (m.newHost) { if (S.me && m.newHost === S.me.id) { S.isHost = true; toast('Организатор вышел — теперь вы организатор встречи', 'ok', 5000); } else { const h = S.participants.find(x => x.id === m.newHost); if (h) { h.host = true; } } } if (p && m.reason !== 'waiting') toast(`${p.name} покинул встречу`); this.renderRoom(); });
       RTC.on('peers', m => { if (!S.joined) return; const map = new Map(S.participants.map(p => [p.id, p])); S.participants = m.peers.filter(p => p.id !== S.me.id).map(p => Object.assign(map.get(p.id) || this.mkPeer(p), p)); const meP = m.peers.find(p => p.id === S.me.id); if (meP) { S.isHost = !!meP.host; S.cohost = !!meP.cohost; } this.renderRoom(); });
       RTC.on('state', m => { if (!S.joined || !S.me) return; if (m.id === S.me.id) { if (S.sharing === 'me' && !m.peer.sharing) this.stopShare(true); return; } const p = S.participants.find(x => x.id === m.id); if (p) Object.assign(p, m.peer, { stream: p.stream }); const prevShare = S.sharing; S.sharing = m.sharingId ? (m.sharingId === S.me.id ? 'me' : m.sharingId) : null; if (S.sharing && S.sharing !== 'me' && S.sharing !== prevShare) { S.wbShared = false; S.view = 'speaker'; if (S.wb) { S.wb.destroy(); S.wb = null; } S.annot = false; toast(`${this.peerName(S.sharing)} демонстрирует экран`); } if (!S.sharing && prevShare && prevShare !== 'me') this.closeAnnotations(); this.renderRoom(); });
       RTC.on('track', m => { if (!S.joined) return; const p = S.participants.find(x => x.id === m.id); if (p) p.stream = m.stream; if (m.kind === 'audio') { this.attachAudio(m.id, m.stream); if (S.recMix && S.recMix.add) S.recMix.add(m.stream); } this.renderStage(); });
-      RTC.on('screenTrack', m => { if (!S.joined) return; if (S.sharing === m.id) this.renderStage(); });
+      RTC.on('screenTrack', m => { if (!S.joined) return; if (m.kind === 'audio' && S.sharing === m.id) this.attachScreenAudio(m.id, m.stream); if (S.sharing === m.id) this.renderStage(); });
       RTC.on('trackchange', m => { if (S.joined) this.renderStage(); });
       RTC.on('conn', m => {
         const p = S.participants.find(x => x.id === m.id); if (!p) return;
@@ -276,6 +276,16 @@
       if (App.settings.spkId && a.setSinkId) a.setSinkId(App.settings.spkId).catch(() => { });
       a.play().catch(() => { });
       this.watchSpeaking(id, stream);
+    },
+    /* звук компьютера демонстрирующего */
+    attachScreenAudio(id, stream) {
+      const S = this.S; if (!stream || !stream.getAudioTracks().length) return;
+      let a = this.audioSink.querySelector(`[data-aid="screen:${id}"]`);
+      if (!a) { a = document.createElement('audio'); a.dataset.aid = 'screen:' + id; a.autoplay = true; this.audioSink.appendChild(a); }
+      if (a.srcObject !== stream) a.srcObject = stream;
+      if (App.settings.spkId && a.setSinkId) a.setSinkId(App.settings.spkId).catch(() => { });
+      a.play().catch(() => { });
+      if (S.recMix && S.recMix.add) S.recMix.add(stream);
     },
     /* индикатор «говорит» для удалённых участников */
     watchSpeaking(id, stream) {
@@ -409,8 +419,15 @@
         this.shareVideo.srcObject = S.displayStream; $('#shareMain', st).appendChild(this.shareVideo);
       } else if (S.sharing && S.sharing !== 'me') {
         const scr = RTC.remoteScreen(S.sharing);
-        if (scr && scr.getVideoTracks().some(t => t.readyState === 'live')) { const v = this.remoteVideo('screen:' + S.sharing, scr); v.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;object-fit:contain;background:#000'; $('#shareMain', st).appendChild(v); }
-        else $('#shareMain', st).insertAdjacentHTML('beforeend', `<div style="position:absolute;inset:0;display:grid;place-items:center;background:linear-gradient(135deg,#0f172a,#1e1b4b);color:#94a3b8;font-weight:700">Ожидаем видео с экрана ${esc(this.peerName(S.sharing))}…</div>`);
+        const vtrack = scr && scr.getVideoTracks().find(t => t.readyState === 'live');
+        if (vtrack) {
+          const v = this.remoteVideo('screen:' + S.sharing, scr); v.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;object-fit:contain;background:#000'; $('#shareMain', st).appendChild(v);
+          const wait = document.createElement('div'); wait.className = 'share-wait'; wait.textContent = `Ожидаем видео с экрана ${this.peerName(S.sharing)}…`; $('#shareMain', st).appendChild(wait);
+          const upd = () => { const has = v.videoWidth > 0 && !vtrack.muted; wait.style.display = has ? 'none' : 'grid'; }; upd();
+          ['loadeddata', 'resize', 'playing'].forEach(ev => v.addEventListener(ev, upd)); vtrack.addEventListener('unmute', upd); vtrack.addEventListener('mute', upd);
+          this.attachScreenAudio(S.sharing, scr);
+        }
+        else $('#shareMain', st).insertAdjacentHTML('beforeend', `<div class="share-wait">Ожидаем видео с экрана ${esc(this.peerName(S.sharing))}…</div>`);
       }
       st.querySelectorAll('[data-remote-video]').forEach(h => { const id = h.dataset.remoteVideo; const p = S.participants.find(x => x.id === id); if (!p || !p.stream) return; const v = this.remoteVideo(id, p.stream); v.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;object-fit:cover;background:#000'; h.appendChild(v); });
       if (S.wbShared) this.mountWhiteboard($('#shareMain', st));
@@ -760,15 +777,21 @@
       const S = this.S;
       if (!S.isHost && !S.allowShare) return toast('Организатор запретил демонстрацию экрана', 'bad');
       try {
-        S.displayStream = await navigator.mediaDevices.getDisplayMedia({ video: !audioOnly || true, audio: true });
+        S.displayStream = await navigator.mediaDevices.getDisplayMedia({
+          video: { frameRate: { ideal: 15, max: 30 } },
+          audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
+          systemAudio: 'include', selfBrowserSurface: 'exclude', surfaceSwitching: 'include', monitorTypeSurfaces: 'include'
+        });
         if (S.wbShared) this.toggleWhiteboard();
         S.sharing = 'me'; S.wbShared = false; this.closeAnnotations();
-        const vt = S.displayStream.getVideoTracks()[0];
+        const vt = S.displayStream.getVideoTracks()[0]; const sat = S.displayStream.getAudioTracks()[0] || null;
         vt.addEventListener('ended', () => this.stopShare());
-        RTC.setScreenTrack(vt);
+        RTC.setScreenTrack(vt, sat);
         this.sendState();
-        S.chat.push({ sys: true, text: 'Вы начали демонстрацию экрана' });
-        this.renderRoom(); toast('Демонстрация экрана начата — участники видят ваш экран', 'ok');
+        S.chat.push({ sys: true, text: 'Вы начали демонстрацию экрана' + (sat ? ' со звуком компьютера' : '') });
+        this.renderRoom();
+        if (sat) toast('Демонстрация начата — участники видят экран и слышат звук компьютера', 'ok', 4000);
+        else toast('Демонстрация начата без звука компьютера. Чтобы участники слышали звук, при выборе экрана включите «Поделиться звуком» (на macOS звук доступен только при показе вкладки)', 'info', 8000);
       } catch (e) {
         if (e.name === 'NotAllowedError') toast('Демонстрация отменена или запрещена в этом окне. Откройте приложение в отдельной вкладке', 'bad', 5000);
         else toast('Демонстрация экрана недоступна: ' + e.message, 'bad');
@@ -900,7 +923,8 @@
         const ctx = new (window.AudioContext || window.webkitAudioContext)(); const dest = ctx.createMediaStreamDestination(); S.recMix = { ctx, dest, added: new Set() };
         const addSrc = (ms) => { if (!ms || !ms.getAudioTracks().length || S.recMix.added.has(ms)) return; S.recMix.added.add(ms); ctx.createMediaStreamSource(ms).connect(dest); };
         if (S.stream) addSrc(S.stream);
-        S.participants.forEach(p => addSrc(RTC.remoteStream(p.id)));
+        S.participants.forEach(p => { addSrc(RTC.remoteStream(p.id)); addSrc(RTC.remoteScreen(p.id)); });
+        if (S.displayStream) addSrc(S.displayStream);
         S.recMix.add = addSrc;
         dest.stream.getAudioTracks().forEach(t => stream.addTrack(t));
       } catch (e) { if (S.stream) S.stream.getAudioTracks().forEach(t => stream.addTrack(t)); }
