@@ -22,6 +22,7 @@
     emit(t, m) { const fn = this.handlers[t]; if (fn) try { fn(m); } catch (e) { console.error('RTC handler', t, e); } },
 
     /* ---------- сигнализация ---------- */
+    url() { return defaultUrl(); },
     connect(url) {
       return new Promise((resolve, reject) => {
         if (this.ws && this.ws.readyState === 1) return resolve();

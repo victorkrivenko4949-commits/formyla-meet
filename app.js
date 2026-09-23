@@ -175,7 +175,7 @@
             <div class="pmi-id">${App.user.pmi}</div>
             <p class="small muted" style="margin:6px 0 14px">Постоянная комната для ваших занятий. Ссылку можно выдать ученикам один раз.</p>
             <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn-gradient btn-sm" data-h="pmiStart">${icon('video')} Начать</button><button class="btn-ghost btn-sm" data-h="pmiCopy">${icon('copy')} Скопировать ссылку</button></div>
-            <div class="stat-row"><div class="stat"><b>${this.history.length}</b><span>встреч</span></div><div class="stat"><b>${this.recordings.length}</b><span>записей</span></div><div class="stat"><b>${this.contacts.filter(c => c.status === 'online').length}</b><span>в сети</span></div></div>
+            <div class="stat-row"><div class="stat"><b>${this.history.length}</b><span>встреч</span></div><div class="stat"><b>${this.recordings.length}</b><span>записей</span></div><div class="stat"><b id="statOnline">—</b><span>сейчас во встречах</span></div></div>
           </div>
           <div class="card">
             <div class="section-title">${icon('clock')} Недавние</div>
@@ -186,6 +186,11 @@
     $('#app').querySelectorAll('[data-h]').forEach(b => b.addEventListener('click', () => this.homeAction(b.dataset.h)));
     $('#app').querySelectorAll('[data-rejoin]').forEach(b => b.addEventListener('click', () => Meeting.open({ topic: b.dataset.rejoin, host: true })));
     this.bindMeetingRows();
+    // реальное число участников во встречах на сервере
+    try {
+      const u = (window.RTC && RTC.url ? RTC.url() : '').replace(/^ws/, 'http').replace(/\/ws$/, '/healthz');
+      if (u) fetch(u).then(r => r.json()).then(d => { const el = $('#statOnline'); if (el) el.textContent = d.peers || 0; }).catch(() => { const el = $('#statOnline'); if (el) el.textContent = '0'; });
+    } catch (e) { }
   };
   App.homeAction = function (a) {
     if (a === 'new') this.newMeeting();
