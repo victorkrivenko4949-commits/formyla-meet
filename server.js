@@ -12,7 +12,7 @@ const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; cha
 /* ---------- статика (для локальной разработки и режима «один сервис») ---------- */
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, 'http://x');
-  if (url.pathname === '/healthz') { res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }); return res.end(JSON.stringify({ ok: true, rooms: rooms.size, peers: [...rooms.values()].reduce((a, r) => a + r.peers.size, 0) })); }
+  if (url.pathname === '/healthz') { res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }); return res.end(JSON.stringify({ ok: true, rooms: rooms.size, peers: [...rooms.values()].reduce((a, r) => a + r.peers.size, 0), turn: iceCache.list.length > 0 })); }
   let p = decodeURIComponent(url.pathname); if (p === '/') p = '/index.html';
   const file = path.normalize(path.join(ROOT, p));
   if (!file.startsWith(ROOT) || /^\/(server\.js|package.*|node_modules|\.git|build_package\.py|formyla_package|formyla_meet_package\.zip)/.test(p)) { res.writeHead(404); return res.end('Not found'); }
@@ -78,8 +78,30 @@ function leave(p, reason) {
 }
 
 const wss = new WebSocketServer({ server, path: '/ws' });
+/* TURN/STUN для клиентов. Задаётся переменными окружения на сервере:
+   METERED_DOMAIN + METERED_API_KEY  — Open Relay / Metered (https://www.metered.ca, бесплатно 20 ГБ/мес), или
+   TURN_URLS (через запятую) + TURN_USERNAME + TURN_CREDENTIAL — любой TURN (ExpressTURN, Cloudflare, свой coturn). */
+let iceCache = { at: 0, list: [] };
+async function getIce() {
+  if (Date.now() - iceCache.at < 6 * 3600e3 && iceCache.list.length) return iceCache.list;
+  let list = [];
+  try {
+    if (process.env.METERED_DOMAIN && process.env.METERED_API_KEY) {
+      const d = process.env.METERED_DOMAIN.replace(/^https?:\/\//, '').replace(/\/.*$/, '');
+      const res = await fetch(`https://${d}/api/v1/turn/credentials?apiKey=${encodeURIComponent(process.env.METERED_API_KEY)}`);
+      if (res.ok) { const arr = await res.json(); if (Array.isArray(arr)) list = arr; }
+    } else if (process.env.TURN_URLS) {
+      list = [{ urls: process.env.TURN_URLS.split(',').map(x => x.trim()).filter(Boolean), username: process.env.TURN_USERNAME || '', credential: process.env.TURN_CREDENTIAL || '' }];
+    }
+  } catch (e) { console.warn('ICE config', e.message); }
+  if (list.length) iceCache = { at: Date.now(), list };
+  return list;
+}
+getIce().then(l => console.log(l.length ? `TURN: ${l.length} записей` : 'TURN не настроен (только STUN) — задайте METERED_DOMAIN/METERED_API_KEY или TURN_URLS'));
+
 wss.on('connection', ws => {
   let me = null; ws.isAlive = true;
+  getIce().then(ice => send(ws, { t: 'hello', ice, turn: ice.length > 0 })).catch(() => send(ws, { t: 'hello', ice: [], turn: false }));
   ws.on('pong', () => { ws.isAlive = true; });
   ws.on('message', raw => {
     let m; try { m = JSON.parse(raw); } catch (e) { return; }

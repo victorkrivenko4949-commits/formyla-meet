@@ -228,7 +228,14 @@
       RTC.on('track', m => { if (!S.joined) return; const p = S.participants.find(x => x.id === m.id); if (p) p.stream = m.stream; if (m.kind === 'audio') { this.attachAudio(m.id, m.stream); if (S.recMix && S.recMix.add) S.recMix.add(m.stream); } this.renderStage(); });
       RTC.on('screenTrack', m => { if (!S.joined) return; if (S.sharing === m.id) this.renderStage(); });
       RTC.on('trackchange', m => { if (S.joined) this.renderStage(); });
-      RTC.on('conn', m => { const p = S.participants.find(x => x.id === m.id); if (p) { p.poor = m.state === 'disconnected' || m.state === 'failed' || m.state === 'checking'; const t = this.layer.querySelector(`.tile-v[data-id="${m.id}"] .connection`); if (t) t.classList.toggle('poor', p.poor); } });
+      RTC.on('conn', m => {
+        const p = S.participants.find(x => x.id === m.id); if (!p) return;
+        p.poor = m.state === 'disconnected' || m.state === 'failed' || m.state === 'checking';
+        p.connState = m.state;
+        const tile = this.layer.querySelector(`.tile-v[data-id="${m.id}"]`);
+        if (tile) { const c = tile.querySelector('.connection'); if (c) c.classList.toggle('poor', p.poor); let st = tile.querySelector('.conn-state'); const txt = m.state === 'failed' ? 'Нет соединения' : (m.state === 'checking' || m.state === 'new' || m.state === 'connecting') ? 'Соединение…' : m.state === 'disconnected' ? 'Переподключение…' : ''; if (txt) { if (!st) { st = document.createElement('div'); st.className = 'conn-state'; tile.appendChild(st); } st.textContent = txt; } else if (st) st.remove(); }
+        if (m.state === 'failed' && m.restarts >= 2 && !p.failToast) { p.failToast = true; toast(`Не удалось установить медиасоединение с ${esc(p.name)}: сети не пропускают прямой трафик${RTC.turn ? '' : ', а ретранслятор (TURN) на сервере не настроен'}. Попробуйте отключить VPN, сменить сеть (Wi‑Fi ↔ мобильная) или переподключиться`, 'bad', 12000); }
+      });
       RTC.on('chat', m => { if (!S.joined) return; const c = this.fromChat(m.msg); if (c.me) return; S.chat.push(c); if (S.panel !== 'chat') { if (!c.sys) { S.unread++; this.renderToolbar(); } if (!c.sys) toast(`${c.from}: ${(c.text || c.file || '').slice(0, 60)}`, 'info', 3000); } else this.renderPanel(); });
       RTC.on('react', m => { if (!S.joined) return; this.react(m.id === S.me.id ? 'me' : m.id, m.emoji, true); });
       RTC.on('caption', m => { if (S.joined && S.captions) this.caption(m.name, m.text); });
@@ -702,8 +709,8 @@
       App.modal('Статистика соединения', `
         <div class="stat-row" style="margin-top:0"><div class="stat"><b>${rtt == null ? '—' : rtt + ' мс'}</b><span>Задержка (RTT)</span></div><div class="stat"><b>${loss}</b><span>Потеряно пакетов</span></div><div class="stat"><b>${jit.length ? Math.max(...jit) + ' мс' : '—'}</b><span>Джиттер</span></div></div>
         <div class="stat-row"><div class="stat"><b>${st.width || 0}×${st.height || 0}</b><span>Разрешение отправки</span></div><div class="stat"><b>${st.frameRate ? Math.round(st.frameRate) : 0} fps</b><span>Кадры/с</span></div><div class="stat"><b>${S.participants.length}</b><span>Соединений</span></div></div>
-        ${rows.length ? `<table style="width:100%;font-size:13px;margin-top:12px;border-collapse:collapse">${rows.map(r => `<tr style="border-top:1px solid var(--border-soft)"><td style="padding:6px 0">${esc(r.name)}</td><td class="muted">${r.rtt == null ? '—' : r.rtt + ' мс'}</td><td class="muted">${r.w ? r.w + '×' + r.h : '—'}</td><td class="muted">${r.fps ? Math.round(r.fps) + ' fps' : '—'}</td></tr>`).join('')}</table>` : '<p class="small muted" style="margin-top:12px">Пока других участников нет — сетевые показатели появятся, когда кто-то подключится.</p>'}
-        <p class="small muted" style="margin-top:14px">Соединения устанавливаются напрямую между участниками (WebRTC); данные — из статистики браузера.</p>`, [{ label: 'Закрыть', cls: 'btn-ghost', act: 'close' }]);
+        ${rows.length ? `<table style="width:100%;font-size:13px;margin-top:12px;border-collapse:collapse">${rows.map(r => `<tr style="border-top:1px solid var(--border-soft)"><td style="padding:6px 0">${esc(r.name)}</td><td class="muted">${r.rtt == null ? '—' : r.rtt + ' мс'}</td><td class="muted">${r.w ? r.w + '×' + r.h : '—'}</td><td class="muted">${r.fps ? Math.round(r.fps) + ' fps' : '—'}</td><td class="muted">${r.state === 'connected' ? (r.path === 'relay' ? 'через ретранслятор' : 'напрямую') : r.state === 'failed' ? 'нет соединения' : 'соединение…'}</td></tr>`).join('')}</table>` : '<p class="small muted" style="margin-top:12px">Пока других участников нет — сетевые показатели появятся, когда кто-то подключится.</p>'}
+        <p class="small muted" style="margin-top:14px">Соединения устанавливаются между браузерами (WebRTC); данные — из статистики браузера. Ретранслятор (TURN) на сервере: ${RTC.turn ? 'настроен' : 'не настроен — участники за строгим NAT или VPN могут не соединиться'}.</p>`, [{ label: 'Закрыть', cls: 'btn-ghost', act: 'close' }]);
     },
     timerModal() {
       const S = this.S;

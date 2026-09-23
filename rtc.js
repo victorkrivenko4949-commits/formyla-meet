@@ -1,11 +1,7 @@
 /* rtc.js — подключение к серверу встреч (WebSocket) и WebRTC-соединения между участниками (mesh) */
 (function () {
-  const ICE = [
-    { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] },
-    { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' },
-    { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' },
-    { urls: 'turns:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' },
-  ];
+  // STUN — всегда; TURN приходит с сервера встреч (сообщение hello), если он настроен
+  const STUN = [{ urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302', 'stun:stun.cloudflare.com:3478'] }];
 
   function defaultUrl() {
     if (window.FM_SIGNAL_URL) return window.FM_SIGNAL_URL;
@@ -41,6 +37,7 @@
 
     route(m) {
       switch (m.t) {
+        case 'hello': this.ice = Array.isArray(m.ice) ? m.ice : []; this.turn = !!m.turn; this.emit('hello', m); break;
         case 'joined': this.me = m.you; this.emit('joined', m); m.peers.forEach(p => this.ensurePeer(p.id, true)); break;
         case 'peer': this.emit('peer', m.peer); this.ensurePeer(m.peer.id, false); break;
         case 'left': this.dropPeer(m.id); this.emit('left', m); break;
@@ -69,7 +66,7 @@
     /* ---------- WebRTC (perfect negotiation) ---------- */
     ensurePeer(id, initiator) {
       if (this.peers.has(id)) return this.peers.get(id);
-      const pc = new RTCPeerConnection({ iceServers: ICE });
+      const pc = new RTCPeerConnection({ iceServers: STUN.concat(this.ice || []) });
       pc.__id = id; pc.__polite = !initiator; pc.__makingOffer = false; pc.__ignoreOffer = false; pc.__cands = [];
       pc.__stream = new MediaStream(); pc.__screen = new MediaStream();
       // Фиксированные m-секции: mid 0 — аудио, 1 — видео камеры, 2 — экран. Их создаёт только инициатор (новый участник);
@@ -93,8 +90,12 @@
         try { pc.__makingOffer = true; await pc.setLocalDescription(); this.send({ t: 'signal', to: id, data: { description: pc.localDescription } }); }
         catch (e) { console.warn('offer', e); } finally { pc.__makingOffer = false; }
       };
-      pc.oniceconnectionstatechange = () => { if (pc.iceConnectionState === 'failed') pc.restartIce(); this.emit('conn', { id, state: pc.iceConnectionState }); };
-      pc.onconnectionstatechange = () => this.emit('conn', { id, state: pc.connectionState });
+      pc.__restarts = 0;
+      pc.oniceconnectionstatechange = () => {
+        if (pc.iceConnectionState === 'failed' && pc.__restarts < 2) { pc.__restarts++; try { pc.restartIce(); } catch (e) { } }
+        this.emit('conn', { id, state: pc.iceConnectionState, restarts: pc.__restarts, turn: !!(this.ice && this.ice.length) });
+      };
+      pc.onconnectionstatechange = () => this.emit('conn', { id, state: pc.connectionState, restarts: pc.__restarts, turn: !!(this.ice && this.ice.length) });
       this.peers.set(id, pc);
       return pc;
     },
@@ -123,11 +124,11 @@
     remoteScreen(id) { const pc = this.peers.get(id); return pc ? pc.__screen : null; },
     async stats(id) {
       const pc = this.peers.get(id); if (!pc) return null;
-      const out = { rtt: null, loss: 0, jitter: null, fps: null, kbps: null, w: 0, h: 0 };
+      const out = { rtt: null, loss: 0, jitter: null, fps: null, kbps: null, w: 0, h: 0, state: pc.connectionState, path: null };
       try {
         const rep = await pc.getStats(); let bytes = 0;
         rep.forEach(s => {
-          if (s.type === 'candidate-pair' && s.state === 'succeeded' && s.currentRoundTripTime != null) out.rtt = Math.round(s.currentRoundTripTime * 1000);
+          if (s.type === 'candidate-pair' && (s.state === 'succeeded' || s.nominated) && s.currentRoundTripTime != null) { out.rtt = Math.round(s.currentRoundTripTime * 1000); const loc = rep.get(s.localCandidateId), rem = rep.get(s.remoteCandidateId); if (loc && rem) out.path = (loc.candidateType === 'relay' || rem.candidateType === 'relay') ? 'relay' : 'direct'; }
           if (s.type === 'inbound-rtp' && s.kind === 'video') { out.fps = s.framesPerSecond || out.fps; out.w = s.frameWidth || out.w; out.h = s.frameHeight || out.h; bytes += s.bytesReceived || 0; if (s.jitter != null) out.jitter = Math.round(s.jitter * 1000); if (s.packetsLost) out.loss += s.packetsLost; }
         });
         out.bytes = bytes;
