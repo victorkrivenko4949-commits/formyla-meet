@@ -10,7 +10,7 @@ const RELAY_ONLY = process.env.RELAY_ONLY !== '0';
     page.setDefaultTimeout(30000);
     page.on('pageerror', e => errors.push(name + ': ' + e.message)); page.on('console', m => { if (m.type() === 'error') errors.push(name + ': ' + m.text()); });
     if (RELAY_ONLY) await page.addInitScript(() => { const O = window.RTCPeerConnection; window.RTCPeerConnection = function (cfg) { return new O(Object.assign({}, cfg, { iceTransportPolicy: 'relay' })); }; window.RTCPeerConnection.prototype = O.prototype; });
-    await page.goto(BASE, { waitUntil: 'commit', timeout: 60000 }); await page.waitForSelector('#headerNewMeeting', { timeout: 60000 }); await page.waitForTimeout(800);
+    await page.goto(BASE, { waitUntil: 'commit', timeout: 60000 }); await page.waitForSelector('#headerNewMeeting', { timeout: 60000 }); await page.waitForFunction(() => window.App && window.Meeting && window.RTC); await page.waitForTimeout(1500);
     return { ctx, page };
   };
   try {
