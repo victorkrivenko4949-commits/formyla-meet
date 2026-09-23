@@ -7,7 +7,7 @@ const BASE = process.env.BASE || 'http://localhost:8787/';
   const mk = async (name) => {
     const ctx = await browser.newContext({ permissions: ['camera', 'microphone'] }); const page = await ctx.newPage(); page.setDefaultTimeout(30000);
     page.on('pageerror', e => errors.push(name + ': ' + e.message)); page.on('console', m => { if (m.type() === 'error') errors.push(name + ': ' + m.text()); });
-    await page.goto(BASE, { waitUntil: 'commit', timeout: 60000 }); await page.waitForSelector('#headerNewMeeting', { timeout: 60000 }); await page.waitForTimeout(600);
+    await page.goto(BASE, { waitUntil: 'commit', timeout: 60000 }); await page.waitForSelector('#headerNewMeeting', { timeout: 60000 }); await page.waitForFunction(() => window.App && window.Meeting && window.RTC); await page.waitForTimeout(1500);
     return { ctx, page };
   };
   const self = (P) => P.page.evaluate(() => ({ mic: Meeting.S.mic, cam: Meeting.S.cam, tracks: Meeting.S.stream ? Meeting.S.stream.getTracks().map(t => t.kind + '/' + (t.enabled ? 'on' : 'off') + '/' + t.readyState) : null, selfVideo: !!document.querySelector('[data-self-video] video, .preview-box video') }));

@@ -9,7 +9,7 @@ const SKIP = process.env.SKIP === '1'; // вход вообще без дост�
   const mk = async (name) => {
     const ctx = await browser.newContext({ permissions: ['camera', 'microphone'] }); const page = await ctx.newPage(); page.setDefaultTimeout(30000);
     page.on('pageerror', e => errors.push(name + ': ' + e.message)); page.on('console', m => { if (m.type() === 'error') errors.push(name + ': ' + m.text()); });
-    await page.goto(BASE, { waitUntil: 'commit', timeout: 60000 }); await page.waitForSelector('#headerNewMeeting', { timeout: 60000 }); await page.waitForTimeout(600);
+    await page.goto(BASE, { waitUntil: 'commit', timeout: 60000 }); await page.waitForSelector('#headerNewMeeting', { timeout: 60000 }); await page.waitForFunction(() => window.App && window.Meeting && window.RTC); await page.waitForTimeout(1500);
     return { ctx, page };
   };
   const hostView = (P) => P.page.evaluate(() => { const p = Meeting.S.participants.find(x => !x.me); const v = document.querySelector(`[data-remote-video="${p.id}"] video`); const a = document.querySelector(`#audioSink audio[data-aid="${p.id}"]`); const tr = p.stream ? p.stream.getTracks().map(t => t.kind + ':' + t.readyState + ':' + (t.muted ? 'muted' : 'live')) : []; return { mic: p.mic, cam: p.cam, video: v ? v.videoWidth + 'x' + v.videoHeight : null, audioEl: a ? !a.paused : null, tracks: tr, tag: document.querySelector(`.tile-v[data-id="${p.id}"] .name-tag`)?.innerHTML.includes('mic-off') ? 'micOff-icon' : 'mic-icon' }; });
