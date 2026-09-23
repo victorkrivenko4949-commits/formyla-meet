@@ -83,15 +83,17 @@ const wss = new WebSocketServer({ server, path: '/ws' });
    TURN_URLS (через запятую) + TURN_USERNAME + TURN_CREDENTIAL — любой TURN (ExpressTURN, Cloudflare, свой coturn). */
 let iceCache = { at: 0, list: [] };
 async function getIce() {
-  if (Date.now() - iceCache.at < 6 * 3600e3 && iceCache.list.length) return iceCache.list;
+  if (Date.now() - iceCache.at < 3600e3 && iceCache.list.length) return iceCache.list;
   let list = [];
   try {
     if (process.env.METERED_DOMAIN && process.env.METERED_API_KEY) {
       const d = process.env.METERED_DOMAIN.replace(/^https?:\/\//, '').replace(/\/.*$/, '');
       const res = await fetch(`https://${d}/api/v1/turn/credentials?apiKey=${encodeURIComponent(process.env.METERED_API_KEY)}`);
-      if (res.ok) { const arr = await res.json(); if (Array.isArray(arr)) list = arr; }
-    } else if (process.env.TURN_URLS) {
-      list = [{ urls: process.env.TURN_URLS.split(',').map(x => x.trim()).filter(Boolean), username: process.env.TURN_USERNAME || '', credential: process.env.TURN_CREDENTIAL || '' }];
+      if (res.ok) { const arr = await res.json(); if (Array.isArray(arr)) list = list.concat(arr.filter(x => /^turns?:/.test(String(x.urls)))); }
+      else console.warn('Metered TURN', res.status);
+    }
+    if (process.env.TURN_URLS) {
+      list.push({ urls: process.env.TURN_URLS.split(',').map(x => x.trim()).filter(Boolean), username: process.env.TURN_USERNAME || '', credential: process.env.TURN_CREDENTIAL || '' });
     }
   } catch (e) { console.warn('ICE config', e.message); }
   if (list.length) iceCache = { at: Date.now(), list };
