@@ -21,7 +21,7 @@
         sharing: null, wbShared: false, recording: false, recPaused: false, captions: false, captionText: '',
         locked: false, waitingRoom: opts.waiting !== false, allowShare: true, allowChat: true, allowRename: true, allowUnmute: true, muteOnEntry: false,
         participants: [], waiting: [], chat: [], polls: [], rooms: [], chatTo: 'all', unread: 0,
-        bg: App.settings.bg || 'none', mirror: App.settings.mirror !== false, hd: true, noise: true,
+        bg: App.settings.bg || 'none', mirror: App.settings.mirror !== false, hd: true, noise: true, music: App.settings.music === true,
         stream: null, displayStream: null, recorder: null, recChunks: [], wb: null, activePop: null, ended: false,
         me: null, connecting: false, waitingScreen: false, cohost: false, wbRemote: false,
       };
@@ -37,7 +37,9 @@
       const S = this.S; const force = !!(opts && opts.force);
       const live = (kind) => S.stream ? S.stream.getTracks().filter(t => t.kind === kind && t.readyState === 'live') : [];
       const needAudio = S.mic || !S.joined, needVideo = !!S.cam;
-      const aCons = { echoCancellation: true, noiseSuppression: S.noise, deviceId: App.settings.micId ? { exact: App.settings.micId } : undefined };
+      const aCons = S.music
+        ? { echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 2, sampleRate: 48000, sampleSize: 16, deviceId: App.settings.micId ? { exact: App.settings.micId } : undefined }
+        : { echoCancellation: true, noiseSuppression: S.noise, autoGainControl: true, deviceId: App.settings.micId ? { exact: App.settings.micId } : undefined };
       const vCons = { width: { ideal: S.hd ? 1280 : 640 }, height: { ideal: S.hd ? 720 : 360 }, deviceId: App.settings.camId ? { exact: App.settings.camId } : undefined };
       try {
         if (force && S.stream) { S.stream.getTracks().forEach(t => t.stop()); S.stream = null; }
@@ -417,7 +419,7 @@
       const tile = (p, extra = '') => `
         <div class="tile-v ${p.speaking ? 'speaking' : ''} ${p.pinned ? 'pinned' : ''} ${p.hand ? 'has-hand' : ''}" data-id="${p.id}" ${extra}>
           ${p.me ? `<div data-self-video style="position:absolute;inset:0"></div>` : ((p.cam || p.camLive) && p.stream && p.stream.getVideoTracks().some(t => t.readyState === 'live') ? `<div data-remote-video="${p.id}" style="position:absolute;inset:0"></div>` : `<div class="avatar-wrap"><span class="avatar avatar-lg" style="background:${p.color};${p.cam ? '' : 'filter:grayscale(.4)'}">${p.initials}</span></div>`)}
-          <div class="badges">${p.host ? `<span class="badge">${icon('crown')} Организатор</span>` : ''}${p.cohost ? `<span class="badge">Соорганизатор</span>` : ''}${p.spotlight ? `<span class="badge">${icon('star')} В центре</span>` : ''}${p.pinned ? `<span class="badge">${icon('pin')}</span>` : ''}${p.room ? `<span class="badge">Зал ${p.room}</span>` : ''}</div>
+          <div class="badges">${p.host ? `<span class="badge">${icon('crown')} Организатор</span>` : ''}${p.cohost ? `<span class="badge">Соорганизатор</span>` : ''}${p.spotlight ? `<span class="badge">${icon('star')} В центре</span>` : ''}${p.pinned ? `<span class="badge">${icon('pin')}</span>` : ''}${p.room ? `<span class="badge">Зал ${p.room}</span>` : ''}${p.me && S.music ? `<span class="badge music-badge">${icon('music')} Оригинальный звук: вкл</span>` : ''}</div>
           ${p.hand ? `<span class="hand" title="Поднята рука">✋</span>` : ''}
           <div class="tile-menu">
             <button data-t="pin:${p.id}" title="${p.pinned ? 'Открепить' : 'Закрепить'}">${icon('pin')}</button>
@@ -539,6 +541,7 @@
       switch (act) {
         case 'mic': if (!S.mic && !S.isHost && !S.cohost && S.allowUnmute === false) { toast('Организатор запретил включать микрофон', 'bad'); return; } S.mic = !S.mic; if (S.stream) S.stream.getAudioTracks().forEach(t => t.enabled = S.mic); if (S.mic && !(S.stream && S.stream.getAudioTracks().some(t => t.readyState === 'live'))) this.getMedia().then(() => { this.sendState(); this.renderToolbar && this.renderToolbar(); }); toast(S.mic ? 'Микрофон включён' : 'Микрофон выключен'); this.sendState(); break;
         case 'cam': S.cam = !S.cam; this.getMedia().then(() => { this.sendState(); this.renderStage(); }); break;
+        case 'music': return this.toggleMusic();
         case 'micMenu': return this.micMenu(btn);
         case 'camMenu': return this.camMenu(btn);
         case 'security': return this.securityMenu(btn);
@@ -600,6 +603,7 @@
         <h5>Динамики</h5>${list(d.speakers, App.settings.spkId || (d.speakers[0] || {}).deviceId, 'spk')}
         <hr>
         <button data-o="noise" class="${S.noise ? 'checked' : ''}">${icon(S.noise ? 'check' : 'volume')} Подавление фонового шума</button>
+        <button data-o="music" class="${S.music ? 'checked' : ''}">${icon('music')} Режим музыканта (оригинальный звук)</button>
         <button data-o="test">${icon('volume')} Проверить динамик и микрофон</button>
         <button data-o="leaveAudio">${icon('phone')} Отключить звук компьютера</button>
         <button data-o="settings">${icon('settings')} Настройки звука…</button>`, m => {
@@ -607,11 +611,20 @@
         m.querySelectorAll('[data-o]').forEach(b => b.addEventListener('click', () => {
           const o = b.dataset.o; this.closePop();
           if (o === 'noise') { S.noise = !S.noise; this.getMedia({ force: true }); toast(S.noise ? 'Подавление шума включено' : 'Подавление шума выключено'); }
+          if (o === 'music') this.toggleMusic();
           if (o === 'test') this.testAudio();
           if (o === 'leaveAudio') { S.mic = false; if (S.stream) S.stream.getAudioTracks().forEach(t => t.stop()); toast('Звук компьютера отключён'); this.renderToolbar(); this.renderStage(); }
           if (o === 'settings') App.openSettingsModal('audio');
         }));
       });
+    },
+    toggleMusic() {
+      const S = this.S;
+      S.music = !S.music;
+      App.settings.music = S.music; App.saveSettings && App.saveSettings();
+      this.getMedia({ force: true });
+      toast(S.music ? 'Режим музыканта включён: шумоподавление, эхо и автогромкость отключены, стерео 48 кГц — для музыки, пения и презентаций со звуком' : 'Режим музыканта выключен — обычный звук для речи', S.music ? 'ok' : 'info', 6000);
+      this.renderStage();
     },
     testAudio() {
       try {
@@ -741,7 +754,7 @@
           if (k === 'apps') this.appsModal();
           if (k === 'layout') { S.view = S.view === 'gallery' ? 'speaker' : 'gallery'; this.renderRoom(); }
           if (k === 'hideSelf') { const t = this.layer.querySelector('.tile-v[data-id=me]'); if (t) t.classList.toggle('hidden'); toast('Ваше видео скрыто только для вас. Нажмите ещё раз, чтобы вернуть'); }
-          if (k === 'shortcuts') App.modal('Горячие клавиши', `<ul style="display:grid;gap:8px;font-size:14px">${[['Alt + A', 'Микрофон вкл/выкл'], ['Alt + V', 'Видео вкл/выкл'], ['Пробел (удерж.)', 'Временно включить микрофон'], ['Alt + S', 'Демонстрация экрана'], ['Alt + R', 'Запись'], ['Alt + H', 'Чат'], ['Alt + U', 'Участники'], ['Alt + Y', 'Поднять руку'], ['Alt + W', 'Доска'], ['Alt + C', 'Субтитры'], ['Alt + F', 'Полный экран'], ['Esc', 'Закрыть панели']].map(([k, v]) => `<li style="display:flex;justify-content:space-between;gap:12px;padding:6px 0;border-bottom:1px solid var(--border-soft)"><span class="muted">${v}</span><kbd style="font-family:inherit;font-weight:800;background:rgba(255,255,255,.08);padding:2px 8px;border-radius:6px">${k}</kbd></li>`).join('')}</ul>`, [{ label: 'Понятно', cls: 'btn-gradient', act: 'close' }]);
+          if (k === 'shortcuts') App.modal('Горячие клавиши', `<ul style="display:grid;gap:8px;font-size:14px">${[['Alt + A', 'Микрофон вкл/выкл'], ['Alt + V', 'Видео вкл/выкл'], ['Пробел (удерж.)', 'Временно включить микрофон'], ['Alt + S', 'Демонстрация экрана'], ['Alt + R', 'Запись'], ['Alt + H', 'Чат'], ['Alt + U', 'Участники'], ['Alt + Y', 'Поднять руку'], ['Alt + W', 'Доска'], ['Alt + M', 'Режим музыканта'], ['Alt + C', 'Субтитры'], ['Alt + F', 'Полный экран'], ['Esc', 'Закрыть панели']].map(([k, v]) => `<li style="display:flex;justify-content:space-between;gap:12px;padding:6px 0;border-bottom:1px solid var(--border-soft)"><span class="muted">${v}</span><kbd style="font-family:inherit;font-weight:800;background:rgba(255,255,255,.08);padding:2px 8px;border-radius:6px">${k}</kbd></li>`).join('')}</ul>`, [{ label: 'Понятно', cls: 'btn-gradient', act: 'close' }]);
           if (k === 'settings') App.openSettingsModal('general');
         }));
       });
@@ -908,10 +921,10 @@
       const S = this.S;
       const host = document.createElement('div'); host.style.cssText = 'position:absolute;inset:0;display:flex;flex-direction:column;background:#fbfbfe;color:#0f172a';
       container.appendChild(host);
-      const saved = S.wb ? { pages: S.wb.pages, page: S.wb.page, title: S.wb.title, bg: S.wb.bg } : null;
+      const saved = S.wb ? { pages: S.wb.pages, page: S.wb.page, title: S.wb.title, bg: S.wb.bg, zoom: S.wb.zoom, panX: S.wb.panX, panY: S.wb.panY } : null;
       if (S.wb) S.wb.destroy();
       S.wb = new Whiteboard(host, { title: saved ? saved.title : (S.wbState && S.wbState.title) || `Доска · ${S.topic}`, onClose: () => this.toggleWhiteboard(), collaborators: S.participants.map(p => ({ name: p.name.split(' ')[0], initials: p.initials, color: p.solid })), onChange: () => { S.wbDirty = true; this.wbChanged(S.wb, 'wb'); }, onCursor: p => RTC.send({ t: 'wbcur', kind: 'wb', x: p.x, y: p.y }) });
-      if (saved) { S.wb.pages = saved.pages; S.wb.page = saved.page; S.wb.bg = saved.bg; S.wb.setTool(S.wb.tool); S.wb.renderPages(); S.wb.render(); }
+      if (saved) { S.wb.pages = saved.pages; S.wb.page = saved.page; S.wb.bg = saved.bg; S.wb.zoom = saved.zoom || 1; S.wb.panX = saved.panX || 0; S.wb.panY = saved.panY || 0; S.wb.updateZoomLabel(); S.wb.setTool(S.wb.tool); S.wb.renderPages(); S.wb.render(); }
       else if (S.wbState && S.wbState.pages) { if (S.wbState.bg) S.wb.bg = S.wbState.bg; this.applyPages(S.wb, S.wbState.pages); }
     },
 
@@ -1114,8 +1127,8 @@
       const S = this.S; if (!S || !S.joined || S.ended) return;
       if (e.target.matches('input, textarea, [contenteditable]')) return;
       if (e.altKey) {
-        const map = { a: 'mic', v: 'cam', s: 'share', r: 'record', h: 'panel:chat', u: 'panel:participants', y: 'hand', w: 'whiteboard', c: 'captions', f: 'fullscreen' };
-        const k = e.key.toLowerCase(); const ru = { 'ф': 'a', 'м': 'v', 'ы': 's', 'к': 'r', 'р': 'h', 'г': 'u', 'н': 'y', 'ц': 'w', 'с': 'c', 'а': 'f' };
+        const map = { a: 'mic', v: 'cam', s: 'share', r: 'record', h: 'panel:chat', u: 'panel:participants', y: 'hand', w: 'whiteboard', c: 'captions', f: 'fullscreen', m: 'music' };
+        const k = e.key.toLowerCase(); const ru = { 'ф': 'a', 'м': 'v', 'ы': 's', 'к': 'r', 'р': 'h', 'г': 'u', 'н': 'y', 'ц': 'w', 'с': 'c', 'а': 'f', 'ь': 'm' };
         const a = map[k] || map[ru[k]]; if (a) { e.preventDefault(); this.action(a); }
       }
       if (e.key === 'Escape') { this.closePop(); this.layer.classList.remove('focus-mode'); if (S.panel) { S.panel = null; this.renderRoom(); } }

@@ -3,6 +3,16 @@
   const COLORS = ['#0f172a', '#ef4444', '#f59e0b', '#22c55e', '#38bdf8', '#8b5cf6', '#ec4899', '#ffffff'];
   const SIZES = [2, 4, 8, 14];
   const NOTE_COLORS = ['#fef08a', '#bbf7d0', '#bae6fd', '#e9d5ff', '#fecdd3'];
+  const STAMPS = ['👍', '✅', '❗', '🔥', '💡', '⭐', '🎯', '❤️'];
+  const PIE_COLORS = ['#6d28d9', '#38bdf8', '#22c55e', '#f59e0b', '#ef4444', '#8b5cf6', '#14b8a6', '#ec4899'];
+  const TEMPLATES = {
+    kanban: { name: 'Канбан-доска проекта', icon: 'board' },
+    swot: { name: 'SWOT-анализ', icon: 'grid' },
+    bmc: { name: 'Business Model Canvas', icon: 'layout' },
+    roadmap: { name: 'Дорожная карта (кварталы)', icon: 'calendar' },
+    retro: { name: 'Ретроспектива команды', icon: 'smile' },
+    eisenhower: { name: 'Матрица Эйзенхауэра', icon: 'filter' },
+  };
 
   class Whiteboard {
     constructor(root, opts = {}) {
@@ -15,6 +25,8 @@
       this.color = COLORS[0];
       this.size = SIZES[1];
       this.fill = false;
+      this.noteColor = NOTE_COLORS[0];
+      this.stamp = STAMPS[0];
       this.bg = opts.overlay ? 'clear' : 'dots';
       this.overlay = !!opts.overlay;   // режим аннотаций поверх демонстрации экрана
       this.zoom = 1; this.panX = 0; this.panY = 0;
@@ -47,7 +59,13 @@
             <button class="wb-tool" data-tool="triangle" title="Треугольник">${icon('triangle')}</button>
             <button class="wb-tool" data-tool="text" title="Текст (T)">${icon('type')}</button>
             <button class="wb-tool" data-tool="note" title="Стикер (N)">${icon('note')}</button>
+            <button class="wb-tool" data-tool="diamond" title="Ромб (D)">${icon('diamond')}</button>
+            <button class="wb-tool" data-tool="darrow" title="Двойная стрелка (B)">${icon('darrow')}</button>
+            <button class="wb-tool" data-tool="stamp" title="Штамп-эмодзи (M)">${icon('smile')}</button>
+            <button class="wb-tool" data-tool="chart" title="Диаграмма (C) — данные бизнеса">${icon('chart')}</button>
             <button class="wb-tool" data-tool="eraser" title="Ластик (E)">${icon('eraser')}</button>
+            <span class="wb-palette wb-note-palette">${NOTE_COLORS.map(c => `<button data-note-color="${c}" style="background:${c}" title="Цвет стикера"></button>`).join('')}</span>
+            <span class="wb-palette wb-stamp-palette">${STAMPS.map(e => `<button data-stamp="${e}">${e}</button>`).join('')}</span>
             <button class="wb-tool" data-tool="laser" title="Лазерная указка">${icon('laser')}</button>
             <span class="wb-sep"></span>
             <div class="wb-colors">
@@ -82,12 +100,21 @@
             <button data-act="zoomIn" title="Увеличить">${icon('zoomIn')}</button>
             <button data-act="zoomReset" title="Сбросить масштаб">${icon('maximize')}</button>
           </div>
-        </div>`;
+        </div>
+`;
       this.canvas = r.querySelector('canvas');
       this.ctx = this.canvas.getContext('2d');
       if (this.overlay) { const t = r.querySelector('.wb-title'); ['hide', 'close'].forEach(a => { const b = r.querySelector(`[data-act=${a}]`); if (b) t.appendChild(b); }); }
       this.wrap = r.querySelector('.wb-canvas-wrap');
       this.cursorsEl = r.querySelector('.wb-cursors');
+      r.querySelectorAll('[data-note-color]').forEach(b => b.addEventListener('click', () => {
+        this.noteColor = b.dataset.noteColor;
+        r.querySelectorAll('[data-note-color]').forEach(x => x.classList.toggle('active', x === b));
+      }));
+      r.querySelectorAll('[data-stamp]').forEach(b => b.addEventListener('click', () => {
+        this.stamp = b.dataset.stamp;
+        r.querySelectorAll('[data-stamp]').forEach(x => x.classList.toggle('active', x === b));
+      }));
       this.renderPages();
       this.renderCollab();
     }
@@ -117,6 +144,8 @@
         } else { this.panX -= e.deltaX; this.panY -= e.deltaY; this.render(); }
       }, { passive: false });
       c.addEventListener('dblclick', e => {
+        const hit = this.hitTest(this.toWorld(e.offsetX, e.offsetY));
+        if (hit && hit.type === 'chart') { this.editChart(hit); return; }
         if (this.tool !== 'text' && this.tool !== 'note') { this.startText(e, 'text'); }
       });
 
@@ -127,7 +156,7 @@
         if ((e.ctrlKey || e.metaKey) && k === 'z') { e.preventDefault(); e.shiftKey ? this.redo() : this.undo(); }
         else if ((e.ctrlKey || e.metaKey) && k === 'y') { e.preventDefault(); this.redo(); }
         else if (!e.ctrlKey && !e.metaKey && !e.altKey) {
-          const map = { v: 'move', p: 'pen', h: 'highlighter', l: 'line', a: 'arrow', r: 'rect', o: 'ellipse', t: 'text', n: 'note', e: 'eraser' };
+          const map = { v: 'move', p: 'pen', h: 'highlighter', l: 'line', a: 'arrow', r: 'rect', o: 'ellipse', t: 'text', n: 'note', e: 'eraser', d: 'diamond', b: 'darrow', m: 'stamp', c: 'chart' };
           if (map[k]) this.setTool(map[k]);
           if (k === 'delete' || k === 'backspace') this.deleteSelected();
         }
@@ -147,6 +176,8 @@
       this.tool = t;
       this.root.querySelectorAll('[data-tool]').forEach(x => x.classList.toggle('active', x.dataset.tool === t));
       this.wrap.className = `wb-canvas-wrap ${this.bg} tool-${t}`;
+      const np = this.root.querySelector('.wb-note-palette'); if (np) np.classList.toggle('show', t === 'note');
+      const sp = this.root.querySelector('.wb-stamp-palette'); if (sp) sp.classList.toggle('show', t === 'stamp');
       if (t !== 'move') { this.selected = null; this.render(); }
       this.hideLaser();
     }
@@ -177,6 +208,9 @@
       const m = document.createElement('div');
       m.className = 'wb-menu';
       m.innerHTML = (this.overlay ? '' : `
+        <h5>Шаблоны для бизнеса</h5>
+        ${Object.entries(TEMPLATES).map(([k, t]) => `<button data-tpl="${k}">${icon(t.icon)} ${t.name}</button>`).join('')}
+        <hr>
         <h5>Фон</h5>
         <button data-bg="plain">${icon('square')} Без сетки ${this.bg === 'plain' ? icon('check') : ''}</button>
         <button data-bg="grid">${icon('grid')} Клетка ${this.bg === 'grid' ? icon('check') : ''}</button>
@@ -194,6 +228,7 @@
         <hr>
         <button data-m="shortcuts">${icon('keyboard')} Горячие клавиши</button>`;
       this.root.querySelector('.wb-top').appendChild(m);
+      m.querySelectorAll('[data-tpl]').forEach(b => b.addEventListener('click', () => { this.applyTemplate(b.dataset.tpl); m.remove(); }));
       m.querySelectorAll('[data-bg]').forEach(b => b.addEventListener('click', () => { this.bg = b.dataset.bg; this.setTool(this.tool); m.remove(); this.commit(); }));
       m.querySelector('input[type=file]').addEventListener('change', ev => this.importJson(ev.target.files[0]));
       m.querySelectorAll('[data-m]').forEach(b => b.addEventListener('click', () => { this.menuAction(b.dataset.m); m.remove(); }));
@@ -206,7 +241,7 @@
       if (a === 'delPage' && this.pages.length > 1) { this.pages.splice(this.page, 1); this.page = Math.max(0, this.page - 1); }
       if (a === 'exportPng') this.exportPng();
       if (a === 'exportJson') this.exportJson();
-      if (a === 'shortcuts') window.toast && toast('V — выделение, P — перо, H — маркер, L — линия, A — стрелка, R — прямоугольник, O — эллипс, T — текст, N — стикер, E — ластик, Ctrl+Z / Ctrl+Y — отмена/повтор, Ctrl+колесо — масштаб, двойной клик — текст', 'ok', 9000);
+      if (a === 'shortcuts') window.toast && toast('V — выделение, P — перо, H — маркер, L — линия, A — стрелка, B — двойная стрелка, R — прямоугольник, O — эллипс, D — ромб, T — текст, N — стикер, M — штамп, C — диаграмма, E — ластик, Ctrl+Z / Ctrl+Y — отмена/повтор, Ctrl+колесо — масштаб, двойной клик — текст, двойной клик по диаграмме — данные', 'ok', 10000);
       this.renderPages(); this.render();
       if (a === 'addPage' || a === 'dupPage' || a === 'delPage') this.commit();
     }
@@ -259,12 +294,18 @@
       if (t === 'laser') { this.showLaser(e.offsetX, e.offsetY); this.laserOn = true; return; }
       if (t === 'text' || t === 'note') { this.startText(e, t); return; }
       if (t === 'eraser') { this.eraseAt(p); this.erasing = true; return; }
+      if (t === 'stamp') {
+        this.pushUndo();
+        this.shapes.push({ id: Date.now() + Math.random(), type: 'stamp', x1: p.x, y1: p.y, x2: p.x + 64, y2: p.y + 64, text: this.stamp || '👍', color: this.color, size: 4 });
+        this.commit(); this.render(); return;
+      }
       if (t === 'move') {
         const s = this.hitTest(p);
         this.selected = s; this.dragging = s ? { start: p, orig: JSON.parse(JSON.stringify(s)) } : null; this.render(); return;
       }
       const base = { type: t, color: this.color, size: this.size, fill: this.fill, id: Date.now() + Math.random() };
-      if (t === 'pen' || t === 'highlighter') this.drawing = { ...base, points: [p] };
+      if (t === 'chart') this.drawing = { ...base, x1: p.x, y1: p.y, x2: p.x, y2: p.y, chartType: 'bar', data: null, title: 'Диаграмма' };
+      else if (t === 'pen' || t === 'highlighter') this.drawing = { ...base, points: [p] };
       else this.drawing = { ...base, x1: p.x, y1: p.y, x2: p.x, y2: p.y };
     }
     move(e) {
@@ -298,6 +339,7 @@
         const d = this.drawing;
         const tooSmall = d.points ? d.points.length < 2 : (Math.abs(d.x2 - d.x1) < 2 && Math.abs(d.y2 - d.y1) < 2);
         if (!tooSmall) { this.pushUndo(); this.shapes.push(d); this.opts.onChange && this.opts.onChange(); }
+        if (d.type === 'chart' && !tooSmall) this.editChart(d);
         this.drawing = null; this.render();
       }
     }
@@ -308,7 +350,7 @@
       const box = document.createElement('div');
       box.className = 'wb-textbox'; box.contentEditable = 'true';
       box.style.left = e.offsetX + 'px'; box.style.top = e.offsetY + 'px';
-      if (kind === 'note') { box.style.background = NOTE_COLORS[this.shapes.filter(s => s.type === 'note').length % NOTE_COLORS.length]; box.style.minWidth = '160px'; box.style.minHeight = '120px'; box.style.borderStyle = 'solid'; }
+      if (kind === 'note') { box.style.background = this.noteColor || NOTE_COLORS[this.shapes.filter(s => s.type === 'note').length % NOTE_COLORS.length]; box.style.minWidth = '160px'; box.style.minHeight = '120px'; box.style.borderStyle = 'solid'; }
       box.dataset.placeholder = kind === 'note' ? 'Стикер…' : 'Введите текст…';
       this.wrap.appendChild(box);
       setTimeout(() => box.focus(), 0);
@@ -407,9 +449,21 @@
           ctx.lineTo(x2 - h * Math.cos(a + Math.PI / 6), y2 - h * Math.sin(a + Math.PI / 6));
           ctx.closePath(); ctx.fill(); break;
         }
-        case 'rect': ctx.beginPath(); ctx.roundRect ? ctx.roundRect(Math.min(x1, x2), Math.min(y1, y2), Math.abs(x2 - x1), Math.abs(y2 - y1), 4) : ctx.rect(Math.min(x1, x2), Math.min(y1, y2), Math.abs(x2 - x1), Math.abs(y2 - y1)); if (s.fill) { ctx.globalAlpha = .25; ctx.fill(); ctx.globalAlpha = 1; } ctx.stroke(); break;
-        case 'ellipse': ctx.beginPath(); ctx.ellipse((x1 + x2) / 2, (y1 + y2) / 2, Math.abs(x2 - x1) / 2, Math.abs(y2 - y1) / 2, 0, 0, Math.PI * 2); if (s.fill) { ctx.globalAlpha = .25; ctx.fill(); ctx.globalAlpha = 1; } ctx.stroke(); break;
-        case 'triangle': ctx.beginPath(); ctx.moveTo((x1 + x2) / 2, y1); ctx.lineTo(x2, y2); ctx.lineTo(x1, y2); ctx.closePath(); if (s.fill) { ctx.globalAlpha = .25; ctx.fill(); ctx.globalAlpha = 1; } ctx.stroke(); break;
+        case 'darrow': {
+          ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+          const a = Math.atan2(y2 - y1, x2 - x1), h = 10 + s.size * 2;
+          [[x2, y2, a], [x1, y1, a + Math.PI]].forEach(([px, py, aa]) => {
+            ctx.beginPath(); ctx.moveTo(px, py);
+            ctx.lineTo(px - h * Math.cos(aa - Math.PI / 6), py - h * Math.sin(aa - Math.PI / 6));
+            ctx.lineTo(px - h * Math.cos(aa + Math.PI / 6), py - h * Math.sin(aa + Math.PI / 6));
+            ctx.closePath(); ctx.fill();
+          }); break;
+        }
+        case 'rect': ctx.beginPath(); ctx.roundRect ? ctx.roundRect(Math.min(x1, x2), Math.min(y1, y2), Math.abs(x2 - x1), Math.abs(y2 - y1), 4) : ctx.rect(Math.min(x1, x2), Math.min(y1, y2), Math.abs(x2 - x1), Math.abs(y2 - y1)); if (s.fill) { if (s.bg) { ctx.fillStyle = s.bg; ctx.fill(); } else { ctx.globalAlpha = .25; ctx.fill(); ctx.globalAlpha = 1; } } ctx.stroke(); break;
+        case 'ellipse': ctx.beginPath(); ctx.ellipse((x1 + x2) / 2, (y1 + y2) / 2, Math.abs(x2 - x1) / 2, Math.abs(y2 - y1) / 2, 0, 0, Math.PI * 2); if (s.fill) { if (s.bg) { ctx.fillStyle = s.bg; ctx.fill(); } else { ctx.globalAlpha = .25; ctx.fill(); ctx.globalAlpha = 1; } } ctx.stroke(); break;
+        case 'triangle': ctx.beginPath(); ctx.moveTo((x1 + x2) / 2, y1); ctx.lineTo(x2, y2); ctx.lineTo(x1, y2); ctx.closePath(); if (s.fill) { if (s.bg) { ctx.fillStyle = s.bg; ctx.fill(); } else { ctx.globalAlpha = .25; ctx.fill(); ctx.globalAlpha = 1; } } ctx.stroke(); break;
+        case 'diamond': ctx.beginPath(); ctx.moveTo((x1 + x2) / 2, y1); ctx.lineTo(x2, (y1 + y2) / 2); ctx.lineTo((x1 + x2) / 2, y2); ctx.lineTo(x1, (y1 + y2) / 2); ctx.closePath(); if (s.fill) { if (s.bg) { ctx.fillStyle = s.bg; ctx.fill(); } else { ctx.globalAlpha = .25; ctx.fill(); ctx.globalAlpha = 1; } } ctx.stroke(); break;
+        case 'stamp': { ctx.font = `${44 + s.size * 2}px "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", sans-serif`; ctx.textBaseline = 'top'; ctx.fillText(s.text, x1, y1); break; }
         case 'text': {
           const m = this.measureText(s);
           ctx.font = `600 ${m.fs}px Satoshi, sans-serif`; ctx.textBaseline = 'top';
@@ -421,6 +475,53 @@
           ctx.fillStyle = s.noteColor || '#fef08a'; ctx.fillRect(x1, y1, w, h); ctx.shadowColor = 'transparent';
           ctx.fillStyle = '#0f172a'; ctx.font = '600 15px Satoshi, sans-serif'; ctx.textBaseline = 'top';
           this.wrapText(ctx, s.text, x1 + 10, y1 + 10, w - 20, 20); break;
+        }
+        case 'chart': {
+          const x = Math.min(x1, x2), y = Math.min(y1, y2), w = Math.abs(x2 - x1), h = Math.abs(y2 - y1);
+          const data = (s.data && s.data.length) ? s.data : [{ label: 'Янв', value: 30 }, { label: 'Фев', value: 55 }, { label: 'Мар', value: 42 }, { label: 'Апр', value: 68 }];
+          const sum = data.reduce((a, d) => a + d.value, 0) || 1;
+          ctx.fillStyle = '#ffffff'; ctx.strokeStyle = '#cbd5e1'; ctx.lineWidth = 1.5;
+          ctx.beginPath(); ctx.roundRect ? ctx.roundRect(x, y, w, h, 10) : ctx.rect(x, y, w, h); ctx.fill(); ctx.stroke();
+          ctx.fillStyle = '#0f172a'; ctx.font = '800 16px Satoshi, sans-serif'; ctx.textBaseline = 'top'; ctx.textAlign = 'left';
+          ctx.fillText(s.title || 'Диаграмма', x + 14, y + 10);
+          if (s.chartType === 'pie') {
+            const cx0 = x + Math.min(h * .5, w * .38), cy0 = y + h / 2 + 8, r = Math.min(h * .32, w * .26);
+            let ang = -Math.PI / 2;
+            data.forEach((d, i) => {
+              const a2 = ang + d.value / sum * Math.PI * 2;
+              ctx.beginPath(); ctx.moveTo(cx0, cy0); ctx.arc(cx0, cy0, r, ang, a2); ctx.closePath();
+              ctx.fillStyle = PIE_COLORS[i % PIE_COLORS.length]; ctx.fill(); ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.stroke();
+              ang = a2;
+            });
+            const lx = Math.min(cx0 + r + 12, x + w - 104); let ly = y + h / 2 - data.length * 11;
+            ctx.font = '700 14px Satoshi, sans-serif';
+            data.forEach((d, i) => {
+              ctx.fillStyle = PIE_COLORS[i % PIE_COLORS.length]; ctx.fillRect(lx, ly + 3, 9, 9);
+              ctx.fillStyle = '#0f172a'; ctx.fillText(`${d.label} — ${Math.round(d.value / sum * 100)}%`, lx + 14, ly + 1);
+              ly += 22;
+            });
+          } else {
+            const px = 34, pb = 30, pt = 40;
+            const cw = w - px - 14, chh = h - pt - pb;
+            const max = Math.max(...data.map(d => d.value), 1);
+            ctx.strokeStyle = '#e2e8f0'; ctx.lineWidth = 1;
+            for (let i = 0; i <= 4; i++) { const gy = y + pt + chh - chh * i / 4; ctx.beginPath(); ctx.moveTo(x + px, gy); ctx.lineTo(x + px + cw, gy); ctx.stroke(); }
+            const bw = cw / data.length;
+            const barColor = s.color === '#ffffff' ? '#6d28d9' : s.color;
+            data.forEach((d, i) => {
+              const bh = chh * (d.value / max);
+              const bx = x + px + i * bw + bw * .18, by = y + pt + chh - bh, bwi = bw * .64;
+              const gr = ctx.createLinearGradient(0, by, 0, y + pt + chh);
+              gr.addColorStop(0, barColor); gr.addColorStop(1, barColor + '99');
+              ctx.fillStyle = gr;
+              ctx.beginPath(); ctx.roundRect ? ctx.roundRect(bx, by, bwi, Math.max(bh, 2), 4) : ctx.rect(bx, by, bwi, Math.max(bh, 2)); ctx.fill();
+              ctx.fillStyle = '#475569'; ctx.font = '600 12px Satoshi, sans-serif'; ctx.textBaseline = 'top'; ctx.textAlign = 'center';
+              ctx.fillText(String(d.label), bx + bwi / 2, y + pt + chh + 8);
+              ctx.fillText(String(d.value), bx + bwi / 2, by - 16);
+              ctx.textAlign = 'left';
+            });
+          }
+          break;
         }
       }
       ctx.restore();
@@ -434,6 +535,144 @@
       ctx.fillText(line, x, yy);
     }
 
+
+    /* ---------- диаграммы ---------- */
+    editChart(shape) {
+      const old = this.root.querySelector('.wb-chart-editor'); if (old) old.remove();
+      const box = document.createElement('div');
+      box.className = 'wb-chart-editor';
+      const cur = (shape.data && shape.data.length) ? shape.data.map(d => `${d.label}, ${d.value}`).join('\n') : 'Январь, 120\nФевраль, 95\nМарт, 140\nАпрель, 175';
+      box.innerHTML = `
+        <h5>${icon('chart')} Данные диаграммы</h5>
+        <p class="small" style="color:#64748b">Одна строка — один столбик или сектор: <b>Название, число</b></p>
+        <textarea class="wb-chart-data" rows="6">${cur}</textarea>
+        <div class="wb-chart-row">
+          <input type="text" class="wb-chart-title" value="${(shape.title || 'Диаграмма').replace(/"/g, '"')}" placeholder="Заголовок">
+          <select class="wb-chart-type">
+            <option value="bar"${shape.chartType !== 'pie' ? ' selected' : ''}>Столбчатая</option>
+            <option value="pie"${shape.chartType === 'pie' ? ' selected' : ''}>Круговая</option>
+          </select>
+        </div>
+        <div class="wb-chart-actions">
+          <button class="wb-chart-cancel">Отмена</button>
+          <button class="wb-chart-save">Сохранить</button>
+        </div>`;
+      this.root.appendChild(box);
+      const close = () => box.remove();
+      box.querySelector('.wb-chart-cancel').onclick = close;
+      box.querySelector('.wb-chart-save').onclick = () => {
+        const rows = box.querySelector('.wb-chart-data').value.split('\n').map(l => l.trim()).filter(Boolean).map(l => {
+          const parts = l.split(/[,;\t]/); const v = parseFloat(parts[1]);
+          return { label: (parts[0] || '').trim() || '—', value: isNaN(v) ? 0 : v };
+        });
+        shape.data = rows.length ? rows : [{ label: '—', value: 1 }];
+        shape.title = box.querySelector('.wb-chart-title').value.trim() || 'Диаграмма';
+        shape.chartType = box.querySelector('.wb-chart-type').value;
+        close(); this.commit(); this.render();
+        window.toast && toast('Диаграмма обновлена — двойной клик по ней, чтобы изменить данные', 'ok');
+      };
+      box.addEventListener('keydown', e => { if (e.key === 'Escape') close(); e.stopPropagation(); });
+    }
+
+    /* ---------- бизнес-шаблоны ---------- */
+    tplShapes(key) {
+      const id = () => Date.now() + Math.random();
+      const box = (x, y, w, h, stroke = '#94a3b8', bg = '#f8fafc', size = 2) => ({ id: id(), type: 'rect', x1: x, y1: y, x2: x + w, y2: y + h, color: stroke, size, fill: true, bg });
+      const label = (x, y, text, sz = 4, color = '#0f172a') => ({ id: id(), type: 'text', x1: x, y1: y, x2: x + 10, y2: y + 10, text, color, size: sz });
+      const band = (x, y, w, text, c, sz = 2.8) => {
+        const two = text.includes('\n');
+        const bh = two ? 58 : 36;
+        return [box(x, y, w, bh, c, c, 1.5), label(x + 12, y + 7, text, sz, '#ffffff')];
+      };
+      const note = (x, y, text, bg = '#fef08a', w = 175, h = 92) => ({ id: id(), type: 'note', x1: x, y1: y, x2: x + w, y2: y + h, text, color: '#0f172a', size: 2, noteColor: bg });
+      let shapes = [];
+      if (key === 'kanban') {
+        shapes.push(label(40, 24, 'Канбан-доска проекта', 6));
+        [['Бэклог', '#64748b'], ['Запланировано', '#7c3aed'], ['В работе', '#2563eb'], ['На проверке', '#d97706'], ['Готово', '#16a34a']].forEach((c, i) => {
+          const x = 40 + i * 232;
+          shapes.push(box(x, 80, 216, 560));
+          shapes.push(...band(x, 80, 216, c[0], c[1]));
+        });
+        shapes.push(note(52, 132, 'Обсудить бюджет Q4', '#fef08a'));
+        shapes.push(note(284, 132, 'Прототип витрины', '#bae6fd'));
+        shapes.push(note(284, 240, 'Найти 2 клиентов на интервью', '#bae6fd'));
+        shapes.push(note(516, 132, 'A/B-тест тарифов', '#bbf7d0'));
+        shapes.push(note(980, 132, 'Отчёт для инвесторов', '#e9d5ff'));
+      } else if (key === 'swot') {
+        shapes.push(label(40, 24, 'SWOT-анализ', 6));
+        [['S · Сильные стороны', '#16a34a', 40, 90], ['W · Слабые стороны', '#dc2626', 640, 90], ['O · Возможности', '#2563eb', 40, 390], ['T · Угрозы', '#d97706', 640, 390]].forEach(q => {
+          shapes.push(box(q[2], q[3], 580, 280, q[1], '#ffffff', 2));
+          shapes.push(...band(q[2], q[3], 580, q[0], q[1]));
+        });
+        shapes.push(note(64, 150, 'Опыт команды в нише', '#bbf7d0', 150, 76));
+        shapes.push(note(224, 250, 'Растущий спрос на онлайн-обучение', '#bbf7d0', 180, 90));
+      } else if (key === 'bmc') {
+        shapes.push(label(40, 18, 'Business Model Canvas', 5.5));
+        const X = 40, Y = 64, W = 1120, cw = W / 5, rowH = 205, gap = 6;
+        const cols = [
+          ['Ключевые\nпартнёры', 0, Y, cw - gap, rowH * 2 + gap, '#334155'],
+          ['Ключевые\nактивности', cw, Y, cw - gap, rowH, '#0e7490'],
+          ['Ценностное\nпредложение', cw * 2, Y, cw - gap, rowH * 2 + gap, '#7c3aed'],
+          ['Отношения\nс клиентами', cw * 3, Y, cw - gap, rowH, '#b45309'],
+          ['Клиентские\nсегменты', cw * 4, Y, cw - gap, rowH * 2 + gap, '#15803d'],
+          ['Ключевые ресурсы', cw, Y + rowH + gap, cw - gap, rowH, '#0e7490'],
+          ['Каналы сбыта', cw * 3, Y + rowH + gap, cw - gap, rowH, '#b45309'],
+          ['Структура издержек', X, Y + (rowH + gap) * 2, W / 2 - gap, 104, '#be123c'],
+          ['Потоки доходов', X + W / 2, Y + (rowH + gap) * 2, W / 2 - gap, 104, '#0369a1'],
+        ];
+        cols.forEach(c => { shapes.push(box(X + c[1], c[2], c[3], c[4], c[5], '#ffffff', 1.5)); shapes.push(...band(X + c[1], c[2], c[3], c[0], c[5], 2.2)); });
+      } else if (key === 'roadmap') {
+        shapes.push(label(40, 24, 'Дорожная карта · год', 6));
+        shapes.push({ id: id(), type: 'arrow', x1: 40, y1: 62, x2: 1160, y2: 62, color: '#64748b', size: 2, fill: false });
+        ['Q1 · цели и планирование', 'Q2 · разработка', 'Q3 · запуск и маркетинг', 'Q4 · масштабирование'].forEach((q, i) => {
+          const x = 40 + i * 292;
+          shapes.push(box(x, 96, 280, 470, '#94a3b8', i % 2 ? '#f8fafc' : '#eef2ff', 1.5));
+          shapes.push(...band(x, 96, 280, q, '#475569'));
+        });
+        shapes.push(note(56, 156, 'Инициатива 1 · владелец · срок', '#bae6fd', 245, 78));
+        shapes.push(note(348, 246, 'Инициатива 2 · владелец · срок', '#bbf7d0', 245, 78));
+        shapes.push(note(932, 336, 'Инициатива 3 · владелец · срок', '#fecdd3', 245, 78));
+      } else if (key === 'retro') {
+        shapes.push(label(40, 24, 'Ретроспектива команды', 6));
+        [['Что удалось 👍', '#16a34a'], ['Что мешало ⚠️', '#dc2626'], ['Что улучшить 💡', '#2563eb']].forEach((c, i) => {
+          const x = 40 + i * 390;
+          shapes.push(box(x, 90, 374, 480, c[1], '#ffffff', 2));
+          shapes.push(...band(x, 90, 374, c[0], c[1]));
+        });
+        shapes.push(note(56, 150, 'Быстро выпустили релиз', '#bbf7d0'));
+        shapes.push(note(446, 150, 'Много переделок из-за требований', '#fecdd3'));
+        shapes.push(note(836, 150, 'Демо каждую пятницу', '#bae6fd'));
+      } else if (key === 'eisenhower') {
+        shapes.push(label(40, 24, 'Матрица Эйзенхауэра', 6));
+        [['Срочно и важно — делать сразу', '#dc2626', 40, 90], ['Важно, не срочно — планировать', '#2563eb', 640, 90], ['Срочно, не важно — делегировать', '#d97706', 40, 390], ['Не срочно и не важно — убрать', '#64748b', 640, 390]].forEach(q => {
+          shapes.push(box(q[2], q[3], 580, 280, q[1], '#ffffff', 2));
+          shapes.push(...band(q[2], q[3], 580, q[0], q[1]));
+        });
+        shapes.push(note(64, 150, 'Звонок клиенту по контракту', '#fef08a', 190, 84));
+        shapes.push(note(664, 150, 'Стратегия на следующий год', '#bae6fd', 190, 84));
+      }
+      return shapes;
+    }
+    fitToShapes(shapes) {
+      let mnx = Infinity, mxx = -Infinity, mny = Infinity, mxy = -Infinity;
+      shapes.forEach(s => { const b = this.bounds(s); mnx = Math.min(mnx, b.x1); mxx = Math.max(mxx, b.x2); mny = Math.min(mny, b.y1); mxy = Math.max(mxy, b.y2); });
+      const rect = this.wrap.getBoundingClientRect(); if (!rect.width || !isFinite(mnx) || mxx <= mnx) return;
+      const pad = 30;
+      this.zoom = Math.min(1.5, (rect.width - pad * 2) / (mxx - mnx), (rect.height - pad * 2) / (mxy - mny));
+      this.panX = (rect.width - (mxx - mnx) * this.zoom) / 2 - mnx * this.zoom;
+      this.panY = (rect.height - (mxy - mny) * this.zoom) / 2 - mny * this.zoom;
+      this.updateZoomLabel();
+    }
+    applyTemplate(key) {
+      const shapes = this.tplShapes(key);
+      if (!shapes.length) return;
+      this.pages.push({ shapes, undo: [], redo: [] });
+      this.page = this.pages.length - 1;
+      this.selected = null;
+      this.fitToShapes(shapes);
+      this.renderPages(); this.render(); this.commit();
+      window.toast && toast(`Шаблон «${TEMPLATES[key].name}» добавлен на новую страницу`, 'ok', 5000);
+    }
     /* ---------- экспорт ---------- */
     exportPng() {
       const off = document.createElement('canvas');
