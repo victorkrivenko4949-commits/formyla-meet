@@ -31,6 +31,8 @@
       this.overlay = !!opts.overlay;   // режим аннотаций поверх демонстрации экрана
       this.zoom = 1; this.panX = 0; this.panY = 0;
       this.drawing = null;
+      this.imgCache = new Map();   // src -> Image (для фигур типа image)
+      this.lastMouse = null;       // последняя позиция курсора над холстом (для точки вставки)
       this.menuOpen = false;
       this.collab = opts.collaborators || [];
       this.build();
@@ -162,12 +164,33 @@
         }
       };
       document.addEventListener('keydown', this.keyHandler);
+
+      // вставка изображения из буфера обмена (Ctrl+V / Cmd+V)
+      this.pasteHandler = e => {
+        if (!this.root.isConnected) return;
+        if (e.target && e.target.matches && e.target.matches('input, textarea, [contenteditable]')) return;
+        const items = e.clipboardData && e.clipboardData.items;
+        if (!items) return;
+        const item = Array.from(items).find(it => it.kind === 'file' && it.type && it.type.startsWith('image/'));
+        if (!item) return;
+        const file = item.getAsFile();
+        if (!file) return;
+        e.preventDefault();
+        const rd = new FileReader();
+        rd.onload = () => { if (typeof rd.result === 'string') this.addImage(rd.result); };
+        rd.onerror = () => { window.toast && toast('Не удалось прочитать изображение из буфера', 'bad'); };
+        rd.readAsDataURL(file);
+      };
+      document.addEventListener('paste', this.pasteHandler);
+      c.addEventListener('pointermove', e => { this.lastMouse = { x: e.offsetX, y: e.offsetY }; });
+
       this.ro = new ResizeObserver(() => this.resize());
       this.ro.observe(this.wrap);
     }
 
     destroy() {
       document.removeEventListener('keydown', this.keyHandler);
+      document.removeEventListener('paste', this.pasteHandler);
       this.ro && this.ro.disconnect();
       clearInterval(this.collabTimer);
     }
@@ -241,7 +264,7 @@
       if (a === 'delPage' && this.pages.length > 1) { this.pages.splice(this.page, 1); this.page = Math.max(0, this.page - 1); }
       if (a === 'exportPng') this.exportPng();
       if (a === 'exportJson') this.exportJson();
-      if (a === 'shortcuts') window.toast && toast('V — выделение, P — перо, H — маркер, L — линия, A — стрелка, B — двойная стрелка, R — прямоугольник, O — эллипс, D — ромб, T — текст, N — стикер, M — штамп, C — диаграмма, E — ластик, Ctrl+Z / Ctrl+Y — отмена/повтор, Ctrl+колесо — масштаб, двойной клик — текст, двойной клик по диаграмме — данные', 'ok', 10000);
+      if (a === 'shortcuts') window.toast && toast('V — выделение, P — перо, H — маркер, L — линия, A — стрелка, B — двойная стрелка, R — прямоугольник, O — эллипс, D — ромб, T — текст, N — стикер, M — штамп, C — диаграмма, E — ластик, Ctrl+Z / Ctrl+Y — отмена/повтор, Ctrl+колесо — масштаб, Ctrl+V — вставить фото из буфера, двойной клик — текст, двойной клик по диаграмме — данные', 'ok', 10000);
       this.renderPages(); this.render();
       if (a === 'addPage' || a === 'dupPage' || a === 'delPage') this.commit();
     }
@@ -404,6 +427,56 @@
       if (s) { if (!this.eraseUndoPushed) { this.pushUndo(); this.eraseUndoPushed = true; setTimeout(() => this.eraseUndoPushed = false, 600); } this.shapes.splice(this.shapes.indexOf(s), 1); this.render(); }
     }
     deleteSelected() { if (this.selected) { this.pushUndo(); this.shapes.splice(this.shapes.indexOf(this.selected), 1); this.selected = null; this.commit(); this.render(); } }
+
+    /* ---------- вставка изображений (Ctrl+V) ---------- */
+    imgFor(src) {
+      let img = this.imgCache.get(src);
+      if (!img) {
+        img = new Image();
+        img.onload = () => this.render();
+        img.src = src;
+        this.imgCache.set(src, img);
+      }
+      return img;
+    }
+    addImage(src) {
+      const img = new Image();
+      img.onload = () => {
+        // сжимаем слишком большие картинки — иначе тяжёлая синхронизация доски и JSON-экспорт
+        let dw = img.naturalWidth, dh = img.naturalHeight;
+        const MAX = 1600;
+        let url = src;
+        if (Math.max(dw, dh) > MAX) {
+          const k = MAX / Math.max(dw, dh);
+          dw = Math.round(dw * k); dh = Math.round(dh * k);
+          try {
+            const off = document.createElement('canvas');
+            off.width = dw; off.height = dh;
+            off.getContext('2d').drawImage(img, 0, 0, dw, dh);
+            const isPng = src.startsWith('data:image/png');
+            url = off.toDataURL(isPng ? 'image/png' : 'image/jpeg', 0.85);
+          } catch (e) { /* оставляем исходник */ }
+        }
+        this.imgCache.set(url, this.imgFor(url));
+        const dpr = window.devicePixelRatio || 1;
+        const vw = this.canvas.width / dpr, vh = this.canvas.height / dpr;
+        // масштаб под видимую область (не больше 70% экрана)
+        const maxW = vw / this.zoom * 0.7, maxH = vh / this.zoom * 0.7;
+        const sc = Math.min(1, maxW / dw, maxH / dh);
+        dw *= sc; dh *= sc;
+        // точка вставки — под курсором, иначе по центру видимой области
+        const c = this.lastMouse ? this.toWorld(this.lastMouse.x, this.lastMouse.y)
+          : { x: (vw / 2 - this.panX) / this.zoom, y: (vh / 2 - this.panY) / this.zoom };
+        this.pushUndo();
+        const s = { id: Date.now() + Math.random(), type: 'image', src: url, x1: c.x - dw / 2, y1: c.y - dh / 2, x2: c.x + dw / 2, y2: c.y + dh / 2, color: this.color, size: 0, fill: false };
+        this.shapes.push(s);
+        this.selected = s;
+        this.commit(); this.render();
+        window.toast && toast('Изображение вставлено на доску — можно перетащить инструментом «выделение» (V)', 'ok', 4000);
+      };
+      img.onerror = () => { window.toast && toast('Буфер обмена не содержит поддерживаемого изображения', 'bad'); };
+      img.src = src;
+    }
     pushUndo() { const pg = this.pages[this.page]; pg.undo.push(JSON.stringify(pg.shapes)); if (pg.undo.length > 60) pg.undo.shift(); pg.redo = []; }
     undo() { const pg = this.pages[this.page]; if (!pg.undo.length) return; pg.redo.push(JSON.stringify(pg.shapes)); pg.shapes = JSON.parse(pg.undo.pop()); this.selected = null; this.commit(); this.render(); }
     redo() { const pg = this.pages[this.page]; if (!pg.redo.length) return; pg.undo.push(JSON.stringify(pg.shapes)); pg.shapes = JSON.parse(pg.redo.pop()); this.commit(); this.render(); }
@@ -463,6 +536,20 @@
         case 'ellipse': ctx.beginPath(); ctx.ellipse((x1 + x2) / 2, (y1 + y2) / 2, Math.abs(x2 - x1) / 2, Math.abs(y2 - y1) / 2, 0, 0, Math.PI * 2); if (s.fill) { if (s.bg) { ctx.fillStyle = s.bg; ctx.fill(); } else { ctx.globalAlpha = .25; ctx.fill(); ctx.globalAlpha = 1; } } ctx.stroke(); break;
         case 'triangle': ctx.beginPath(); ctx.moveTo((x1 + x2) / 2, y1); ctx.lineTo(x2, y2); ctx.lineTo(x1, y2); ctx.closePath(); if (s.fill) { if (s.bg) { ctx.fillStyle = s.bg; ctx.fill(); } else { ctx.globalAlpha = .25; ctx.fill(); ctx.globalAlpha = 1; } } ctx.stroke(); break;
         case 'diamond': ctx.beginPath(); ctx.moveTo((x1 + x2) / 2, y1); ctx.lineTo(x2, (y1 + y2) / 2); ctx.lineTo((x1 + x2) / 2, y2); ctx.lineTo(x1, (y1 + y2) / 2); ctx.closePath(); if (s.fill) { if (s.bg) { ctx.fillStyle = s.bg; ctx.fill(); } else { ctx.globalAlpha = .25; ctx.fill(); ctx.globalAlpha = 1; } } ctx.stroke(); break;
+        case 'image': {
+          const img = s.src ? this.imgFor(s.src) : null;
+          const x = Math.min(x1, x2), y = Math.min(y1, y2), w = Math.abs(x2 - x1), h = Math.abs(y2 - y1);
+          if (img && img.complete && img.naturalWidth) {
+            ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high';
+            ctx.drawImage(img, x, y, w, h);
+          } else {
+            ctx.fillStyle = '#e2e8f0'; ctx.fillRect(x, y, w, h);
+            ctx.strokeStyle = '#94a3b8'; ctx.lineWidth = 1.5; ctx.strokeRect(x, y, w, h);
+            ctx.fillStyle = '#64748b'; ctx.font = '600 14px Satoshi, sans-serif'; ctx.textBaseline = 'middle'; ctx.textAlign = 'center';
+            ctx.fillText('Загрузка изображения…', x + w / 2, y + h / 2);
+          }
+          break;
+        }
         case 'stamp': { ctx.font = `${44 + s.size * 2}px "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", sans-serif`; ctx.textBaseline = 'top'; ctx.fillText(s.text, x1, y1); break; }
         case 'text': {
           const m = this.measureText(s);
