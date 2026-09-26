@@ -220,6 +220,32 @@
       RTC.setLocalStream(S.stream);
       RTC.send({ t: 'join', room: S.id, create: !!S.isHost, name: S.name, pw: S.pw, topic: S.topic, waiting: S.waitingRoom, mic: S.mic && !!(S.stream && S.stream.getAudioTracks().length), cam: S.cam && !!(S.stream && S.stream.getVideoTracks().length) });
     },
+    /* переподключение к серверу встреч без выхода из комнаты (например, после кратковременного сбоя сети или хостинга) */
+    async tryReconnect(attempt = 1) {
+      const S = this.S; if (!S || S.ended) return;
+      if (S.reconnecting) return; S.reconnecting = true;
+      const max = 8;
+      let toastEl = toast(`Соединение потеряно — переподключаемся… (попытка ${attempt}/${max})`, 'info', 15000);
+      try {
+        await RTC.connect();
+        if (this.S !== S || S.ended) return;
+        RTC.send({ t: 'join', room: S.id, create: false, name: S.name, pw: S.pw, topic: S.topic, waiting: S.waitingRoom, mic: S.mic && !!(S.stream && S.stream.getAudioTracks().length), cam: S.cam && !!(S.stream && S.stream.getVideoTracks().length) });
+        S.reconnecting = false;
+        if (toastEl) toastEl.remove();
+        toast('Соединение восстановлено', 'ok', 3000);
+      } catch (e) {
+        S.reconnecting = false;
+        if (toastEl) toastEl.remove();
+        if (this.S !== S || S.ended) return;
+        if (attempt >= max) {
+          S.endReason = 'Не удалось восстановить соединение с сервером встреч';
+          this.end(false, true);
+          return;
+        }
+        const delay = Math.min(15000, 1000 * Math.pow(1.6, attempt));
+        setTimeout(() => { if (this.S === S && !S.ended) this.tryReconnect(attempt + 1); }, delay);
+      }
+    },
     /* участник сервера -> объект участника интерфейса */
     mkPeer(p) { return Object.assign({ speaking: false, poor: false, pinned: false, stream: null }, p, { room: p.room || null }); },
     peerName(id) { const S = this.S; if (id === 'me' || (S.me && id === S.me.id)) return S.name; const p = S.participants.find(x => x.id === id); return p ? p.name : 'Участник'; },
@@ -231,7 +257,7 @@
       RTC.on('denied', () => { if (this.S !== S) return; S.endReason = 'Организатор отклонил ваш запрос на вход'; this.end(false, true); });
       RTC.on('removed', () => { if (this.S !== S) return; S.endReason = 'Организатор удалил вас из встречи'; this.end(false, true); });
       RTC.on('ended', () => { if (this.S !== S) return; S.endReason = 'Организатор завершил встречу для всех'; this.end(false, true); });
-      RTC.on('disconnected', () => { if (this.S !== S || S.ended) return; if (S.joined || S.waitingScreen) { S.endReason = 'Соединение с сервером встреч потеряно'; this.end(false, true); } });
+      RTC.on('disconnected', () => { if (this.S !== S || S.ended) return; if (S.joined || S.waitingScreen) this.tryReconnect(); });
       RTC.on('joined', m => {
         if (this.S !== S) return;
         S.me = m.you; S.isHost = !!m.you.host; S.cohost = !!m.you.cohost; S.name = m.you.name; S.connecting = false; S.waitingScreen = false;
