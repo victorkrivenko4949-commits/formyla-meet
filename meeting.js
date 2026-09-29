@@ -66,7 +66,7 @@
         if (!S.stream.getTracks().length) { S.stream = null; this.attachSelf(); RTC.setLocalStream(null); return; }
         S.stream.getAudioTracks().forEach(t => t.enabled = S.mic);
         S.mediaError = null; S.permState = 'granted';
-        RTC.setLocalStream(S.stream);
+        RTC.music = !!S.music; RTC.setLocalStream(S.stream);
         this.attachSelf(); this.renderPermBox();
         this.startLevelMeter();
         App.refreshDevices && App.refreshDevices();

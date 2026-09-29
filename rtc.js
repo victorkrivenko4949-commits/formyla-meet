@@ -62,6 +62,7 @@
       let fresh = false;
       const rep = (tr, track) => { if (tr && tr.sender && tr.sender.track !== track) { if (track && !tr.sender.track) fresh = true; tr.sender.replaceTrack(track).catch(() => { }); } };
       rep(at, a); rep(vt, v); rep(st, this.screenTrack); rep(sa, this.screenAudio);
+      setTimeout(() => this.applyAudioQuality(), 0);
       // Дорожка появилась там, где при согласовании её не было (вход с выключенной камерой/микрофоном):
       // повторно согласуем сессию, чтобы у собеседника (в т.ч. Safari/Firefox) дорожка точно заиграла.
       if (fresh && pc.remoteDescription) this.renegotiate(pc);
@@ -71,9 +72,44 @@
       if (pc.signalingState !== 'stable' || pc.__makingOffer) { pc.__renegoPending = true; return; }
       pc.__renegoPending = false;
       (async () => {
-        try { pc.__makingOffer = true; await pc.setLocalDescription(); this.send({ t: 'signal', to: pc.__id, data: { description: pc.localDescription } }); }
+        try { pc.__makingOffer = true; await this.setLocal(pc); this.send({ t: 'signal', to: pc.__id, data: { description: pc.localDescription } }); }
         catch (e) { console.warn('renegotiate', e); } finally { pc.__makingOffer = false; }
       })();
+    },
+
+    /* ---------- качество звука (Opus): стерео, высокий битрейт, без DTX ---------- */
+    music: false,
+    tuneSdp(sdp) {
+      const lines = sdp.split('\r\n'); const out = []; let inAudio = false, pt = null, done = false;
+      const params = 'stereo=1;sprop-stereo=1;maxaveragebitrate=256000;maxplaybackrate=48000;useinbandfec=1;usedtx=0;cbr=0';
+      for (let i = 0; i < lines.length; i++) {
+        const l = lines[i];
+        if (l.startsWith('m=')) { inAudio = l.startsWith('m=audio'); pt = null; done = false; }
+        if (inAudio) { const m = l.match(/^a=rtpmap:(\d+) opus\/48000/i); if (m) pt = m[1]; }
+        if (inAudio && pt && l.startsWith('a=fmtp:' + pt + ' ')) {
+          const base = l.slice(('a=fmtp:' + pt + ' ').length).split(';').filter(x => x && !/^(stereo|sprop-stereo|maxaveragebitrate|maxplaybackrate|useinbandfec|usedtx|cbr)=/.test(x));
+          out.push('a=fmtp:' + pt + ' ' + base.concat(params.split(';')).join(';')); done = true; continue;
+        }
+        out.push(l);
+        if (inAudio && pt && !done && l.startsWith('a=rtpmap:' + pt + ' ') && !lines.some(x => x.startsWith('a=fmtp:' + pt + ' '))) { out.push('a=fmtp:' + pt + ' ' + params); done = true; }
+      }
+      return out.join('\r\n');
+    },
+    async setLocal(pc) {
+      const d = await (pc.signalingState === 'have-remote-offer' ? pc.createAnswer() : pc.createOffer());
+      try { d.sdp = this.tuneSdp(d.sdp); } catch (e) { console.warn('tuneSdp', e); }
+      await pc.setLocalDescription(d);
+    },
+    applyAudioQuality() {
+      for (const pc of this.peers.values()) {
+        const at = pc.getTransceivers().find(t => t.__kind === 'audio'); if (!at || !at.sender || !at.sender.track) continue;
+        try { at.sender.track.contentHint = this.music ? 'music' : 'speech'; } catch (e) { }
+        try {
+          const prm = at.sender.getParameters(); if (!prm.encodings || !prm.encodings.length) prm.encodings = [{}];
+          prm.encodings[0].maxBitrate = this.music ? 256000 : 64000; prm.encodings[0].priority = 'high'; prm.encodings[0].networkPriority = 'high';
+          at.sender.setParameters(prm).catch(() => { });
+        } catch (e) { }
+      }
     },
 
     /* ---------- WebRTC (perfect negotiation) ---------- */
@@ -101,7 +137,7 @@
       pc.onicecandidate = e => { if (e.candidate) this.send({ t: 'signal', to: id, data: { candidate: e.candidate } }); };
       pc.onnegotiationneeded = async () => {
         if (!initiator && !pc.remoteDescription) return; // отвечающая сторона ждёт предложение
-        try { pc.__makingOffer = true; await pc.setLocalDescription(); this.send({ t: 'signal', to: id, data: { description: pc.localDescription } }); }
+        try { pc.__makingOffer = true; await this.setLocal(pc); this.send({ t: 'signal', to: id, data: { description: pc.localDescription } }); }
         catch (e) { console.warn('offer', e); } finally { pc.__makingOffer = false; }
       };
       pc.onsignalingstatechange = () => { if (pc.signalingState === 'stable' && pc.__renegoPending) setTimeout(() => this.renegotiate(pc), 50); };
@@ -126,7 +162,7 @@
           pc.getTransceivers().forEach(t => { if (!t.__kind) { t.__kind = { '0': 'audio', '1': 'video', '2': 'screen', '3': 'screenAudio' }[t.mid] || null; if (t.__kind) { try { t.direction = 'sendrecv'; } catch (e) { } } } });
           this.syncSenders(pc); pc.__renegoPending = false; // дорожки уже попадут в этот ответ
           while (pc.__cands.length) { const c = pc.__cands.shift(); try { await pc.addIceCandidate(c); } catch (e) { console.warn('cand', e); } }
-          if (data.description.type === 'offer') { await pc.setLocalDescription(); this.send({ t: 'signal', to: from, data: { description: pc.localDescription } }); }
+          if (data.description.type === 'offer') { await this.setLocal(pc); this.send({ t: 'signal', to: from, data: { description: pc.localDescription } }); }
         } else if (data.candidate) {
           if (!pc.remoteDescription) { pc.__cands.push(data.candidate); return; }
           try { await pc.addIceCandidate(data.candidate); } catch (e) { if (!pc.__ignoreOffer) console.warn('cand', e); }
