@@ -128,6 +128,7 @@
         this.syncSenders(pc);
       }
       pc.ontrack = e => {
+        if (e.track.kind === 'audio') { try { e.receiver.jitterBufferTarget = 120; } catch (x) { } }
         const isScreen = e.transceiver.mid === '2' || e.transceiver.mid === '3';
         if (isScreen) { pc.__screen.addTrack(e.track); this.emit('screenTrack', { id, stream: pc.__screen, track: e.track, kind: e.track.kind }); }
         else { pc.__stream.addTrack(e.track); this.emit('track', { id, stream: pc.__stream, kind: e.track.kind }); }

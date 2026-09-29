@@ -38,7 +38,7 @@
       const live = (kind) => S.stream ? S.stream.getTracks().filter(t => t.kind === kind && t.readyState === 'live') : [];
       const needAudio = S.mic || !S.joined, needVideo = !!S.cam;
       const aCons = S.music
-        ? { echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 2, sampleRate: 48000, sampleSize: 16, deviceId: App.settings.micId ? { exact: App.settings.micId } : undefined }
+        ? { echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 2, sampleRate: 48000, sampleSize: 16, latency: 0.01, voiceIsolation: false, advanced: [{ googHighpassFilter: false }, { googNoiseSuppression: false }, { googAutoGainControl: false }, { googEchoCancellation: false }, { googTypingNoiseDetection: false }], deviceId: App.settings.micId ? { exact: App.settings.micId } : undefined }
         : { echoCancellation: true, noiseSuppression: S.noise, autoGainControl: true, deviceId: App.settings.micId ? { exact: App.settings.micId } : undefined };
       const vCons = { width: { ideal: S.hd ? 1280 : 640 }, height: { ideal: S.hd ? 720 : 360 }, deviceId: App.settings.camId ? { exact: App.settings.camId } : undefined };
       try {
@@ -140,6 +140,7 @@
               <div><div class="small muted" style="margin-bottom:6px">Уровень микрофона</div><div class="level-meter"><i></i></div></div>
               <label class="check"><input type="checkbox" id="pjRemember" checked> Запомнить настройки микрофона и камеры</label>
               <label class="check"><input type="checkbox" id="pjAudio" checked> Подключиться со звуком компьютера</label>
+              <label class="check"><input type="checkbox" id="pjMusic" ${S.music ? 'checked' : ''}> Режим музыканта (оригинальный звук, стерео) — играйте в наушниках</label>
               <div class="prejoin-actions">
                 <button class="btn-gradient" data-a="join" style="padding:13px 30px;font-size:15px">${S.isHost ? 'Начать встречу' : 'Подключиться'}</button>
                 <button class="btn-ghost" data-a="copy">${icon('copy')} Скопировать приглашение</button>
@@ -186,7 +187,7 @@
       const t = box.querySelector('[data-p="tab"]'); if (t) t.onclick = () => window.open(location.href, '_blank', 'noopener');
       box.querySelector('[data-p="skip"]').onclick = () => { S.cam = false; S.mic = false; box.innerHTML = ''; this.renderPrejoin(); };
     },
-    prejoinAction(a) {
+    async prejoinAction(a) {
       const S = this.S;
       if (a === 'cancel') return this.close();
       if (a === 'mic') { S.mic = !S.mic; this.renderPrejoin(); this.attachSelf(); if (S.stream) this.startLevelMeter(); }
@@ -197,6 +198,7 @@
         const n = $('#pjName').value.trim(); if (!n) return toast('Введите имя', 'bad');
         const pw = $('#pjPw'); if (pw) S.pw = pw.value.trim();
         S.name = n; App.user.name = n; App.user.initials = SIM.initials(n) || 'Я'; App.saveUser && App.saveUser();
+        const pjm = $('#pjMusic'); if (pjm && pjm.checked !== !!S.music) { S.music = pjm.checked; App.settings.music = S.music; App.saveSettings && App.saveSettings(); await this.getMedia({ force: true }); }
         if ($('#pjRemember').checked) { App.settings.micOn = S.mic; App.settings.camOn = S.cam; }
         this.join();
       }
