@@ -17,6 +17,7 @@
 
   class Whiteboard {
     constructor(root, opts = {}) {
+      this.sel = [];                   // выделенные фигуры (одна или несколько)
       this.root = root;
       this.opts = opts;
       this.title = opts.title || 'Доска без названия';
@@ -46,6 +47,8 @@
     }
 
     get shapes() { return this.pages[this.page].shapes; }
+    get selected() { return this.sel[0] || null; }
+    set selected(s) { this.sel = s ? [s] : []; }
 
     build() {
       const r = this.root;
@@ -166,10 +169,16 @@
         const k = e.key.toLowerCase();
         if ((e.ctrlKey || e.metaKey) && k === 'z') { e.preventDefault(); e.shiftKey ? this.redo() : this.undo(); }
         else if ((e.ctrlKey || e.metaKey) && k === 'y') { e.preventDefault(); this.redo(); }
+        else if ((e.ctrlKey || e.metaKey) && k === 'a') { e.preventDefault(); this.selectAll(); }
+        else if ((e.ctrlKey || e.metaKey) && k === 'd') { e.preventDefault(); this.duplicateSel(); }
+        else if ((e.ctrlKey || e.metaKey) && k === 's') { e.preventDefault(); this.exportJson(); }
         else if (!e.ctrlKey && !e.metaKey && !e.altKey) {
           const map = { v: 'move', p: 'pen', h: 'highlighter', l: 'line', a: 'arrow', r: 'rect', o: 'ellipse', t: 'text', n: 'note', e: 'eraser', d: 'diamond', b: 'darrow', m: 'stamp', c: 'chart' };
           if (map[k]) this.setTool(map[k]);
-          if (k === 'delete' || k === 'backspace') this.deleteSelected();
+          if (k === 'delete' || k === 'backspace') { e.preventDefault(); this.deleteSelected(); }
+          if (k === 'escape') { this.sel = []; this.render(); }
+          const st = e.shiftKey ? 10 : 1;
+          if (this.sel.length && k.startsWith('arrow')) { e.preventDefault(); this.nudge(k === 'arrowleft' ? -st : k === 'arrowright' ? st : 0, k === 'arrowup' ? -st : k === 'arrowdown' ? st : 0); }
         }
       };
       document.addEventListener('keydown', this.keyHandler);
@@ -181,7 +190,18 @@
         const items = e.clipboardData && e.clipboardData.items;
         if (!items) return;
         const item = Array.from(items).find(it => it.kind === 'file' && it.type && it.type.startsWith('image/'));
-        if (!item) return;
+        if (!item) {
+          const text = (e.clipboardData.getData('text/plain') || '');
+          if (text.startsWith('FORMYLA-WB:')) { e.preventDefault(); this.pasteShapes(text, true); }
+          else if (text.trim()) {
+            e.preventDefault(); this.pushUndo();
+            const dpr = window.devicePixelRatio || 1, m = this.lastMouse || { x: this.canvas.width / dpr / 2, y: this.canvas.height / dpr / 3 };
+            const c = this.toWorld(m.x, m.y);
+            const sh = { id: Date.now() + Math.random(), type: 'text', x1: c.x, y1: c.y, x2: c.x + 10, y2: c.y + 10, text: text.trim().slice(0, 2000), color: this.color, size: this.size };
+            this.shapes.push(sh); this.setTool('move'); this.sel = [sh]; this.commit(); this.render();
+          }
+          return;
+        }
         const file = item.getAsFile();
         if (!file) return;
         e.preventDefault();
@@ -191,6 +211,11 @@
         rd.readAsDataURL(file);
       };
       document.addEventListener('paste', this.pasteHandler);
+      const inField = e => e.target && e.target.matches && e.target.matches('input, textarea, [contenteditable]');
+      this.copyHandler = e => { if (!this.root.isConnected || inField(e)) return; this.copySel(e); };
+      this.cutHandler = e => { if (!this.root.isConnected || inField(e)) return; this.cutSel(e); };
+      document.addEventListener('copy', this.copyHandler);
+      document.addEventListener('cut', this.cutHandler);
       c.addEventListener('pointermove', e => { this.lastMouse = { x: e.offsetX, y: e.offsetY }; });
 
       this.ro = new ResizeObserver(() => this.resize());
@@ -200,6 +225,8 @@
     destroy() {
       document.removeEventListener('keydown', this.keyHandler);
       document.removeEventListener('paste', this.pasteHandler);
+      document.removeEventListener('copy', this.copyHandler);
+      document.removeEventListener('cut', this.cutHandler);
       this.ro && this.ro.disconnect();
       clearInterval(this.collabTimer);
     }
@@ -217,7 +244,7 @@
     setColor(c, custom) {
       this.color = c;
       this.root.querySelectorAll('.wb-color[data-color]').forEach(x => x.classList.toggle('active', !custom && x.dataset.color === c));
-      if (this.selected) { this.selected.color = c; this.render(); }
+      if (this.sel.length) { this.sel.forEach(x => { x.color = c; }); this.commit(); this.render(); }
     }
 
     action(act, e) {
@@ -274,7 +301,7 @@
       if (a === 'delPage' && this.pages.length > 1) { this.pages.splice(this.page, 1); this.page = Math.max(0, this.page - 1); }
       if (a === 'exportPng') this.exportPng();
       if (a === 'exportJson') this.exportJson();
-      if (a === 'shortcuts') window.toast && toast('V — выделение, P — перо, H — маркер, L — линия, A — стрелка, B — двойная стрелка, R — прямоугольник, O — эллипс, D — ромб, T — текст, N — стикер, M — штамп, C — диаграмма, E — ластик (размер — на панели рядом), Ctrl+Z / Ctrl+Y — отмена/повтор, Ctrl+колесо — масштаб, правая кнопка мыши — перемещение по доске, Ctrl+V — вставить фото из буфера, двойной клик по диаграмме — данные', 'ok', 10000);
+      if (a === 'shortcuts') window.toast && toast('V — выделение, P — перо, H — маркер, L — линия, A — стрелка, B — двойная стрелка, R — прямоугольник, O — эллипс, D — ромб, T — текст, N — стикер, M — штамп, C — диаграмма, E — ластик (размер — на панели рядом), Ctrl+Z / Ctrl+Y — отмена/повтор, Ctrl+A — выделить всё, Ctrl+C / Ctrl+X / Ctrl+V — копировать/вырезать/вставить, Ctrl+D — дублировать, Ctrl+S — сохранить, Delete — удалить, стрелки — сдвиг (Shift — быстрее), Shift+клик — добавить к выделению, Esc — снять выделение, Ctrl+колесо — масштаб, правая кнопка мыши — перемещение по доске, Ctrl+V — вставить фото из буфера, двойной клик по диаграмме — данные', 'ok', 10000);
       this.renderPages(); this.render();
       if (a === 'addPage' || a === 'dupPage' || a === 'delPage') this.commit();
     }
@@ -336,7 +363,10 @@
       }
       if (t === 'move') {
         const s = this.hitTest(p);
-        this.selected = s; this.dragging = s ? { start: p, orig: JSON.parse(JSON.stringify(s)) } : null; this.render(); return;
+        if (s && e.shiftKey) { const i = this.sel.indexOf(s); if (i >= 0) this.sel.splice(i, 1); else this.sel.push(s); this.dragging = null; this.render(); return; }
+        if (s && !this.sel.includes(s)) this.sel = [s];
+        if (!s) this.sel = [];
+        this.dragging = s ? { start: p, origs: this.sel.map(x => JSON.parse(JSON.stringify(x))), moved: false } : null; this.render(); return;
       }
       const base = { type: t, color: this.color, size: this.size, fill: this.fill, id: Date.now() + Math.random() };
       if (t === 'chart') this.drawing = { ...base, x1: p.x, y1: p.y, x2: p.x, y2: p.y, chartType: 'bar', data: null, title: 'Диаграмма' };
@@ -350,10 +380,10 @@
       if (this.tool === 'eraser') { this.eraserPos = { x: e.offsetX, y: e.offsetY }; if (!this.erasing) { this.render(); return; } }
       if (this.tool === 'laser') { if (this.laserOn || true) this.showLaser(e.offsetX, e.offsetY); return; }
       if (this.erasing) { this.eraseAt(p); return; }
-      if (this.dragging && this.selected) {
-        const dx = p.x - this.dragging.start.x, dy = p.y - this.dragging.start.y, o = this.dragging.orig, s = this.selected;
-        if (o.points) s.points = o.points.map(q => ({ x: q.x + dx, y: q.y + dy }));
-        else { s.x1 = o.x1 + dx; s.y1 = o.y1 + dy; s.x2 = o.x2 + dx; s.y2 = o.y2 + dy; }
+      if (this.dragging && this.sel.length) {
+        const dx = p.x - this.dragging.start.x, dy = p.y - this.dragging.start.y;
+        if (!this.dragging.moved) { if (Math.hypot(dx, dy) * this.zoom < 3) return; this.pushUndo(); this.dragging.moved = true; }
+        this.sel.forEach((s, i) => this.moveShape(s, this.dragging.origs[i], dx, dy));
         this.render(); return;
       }
       if (!this.drawing) return;
@@ -370,7 +400,7 @@
     up() {
       this.panning = null; this.laserOn = false;
       if (this.erasing) { this.erasing = false; this.commit(); }
-      if (this.dragging) { this.dragging = null; this.commit(); }
+      if (this.dragging) { const mv = this.dragging.moved; this.dragging = null; if (mv) this.commit(); }
       if (this.drawing) {
         const d = this.drawing;
         const tooSmall = d.points ? d.points.length < 2 : (Math.abs(d.x2 - d.x1) < 2 && Math.abs(d.y2 - d.y1) < 2);
@@ -500,7 +530,52 @@
       }
       if (removed) this.render();
     }
-    deleteSelected() { if (this.selected) { this.pushUndo(); this.shapes.splice(this.shapes.indexOf(this.selected), 1); this.selected = null; this.commit(); this.render(); } }
+    moveShape(s, o, dx, dy) {
+      if (o.points) s.points = o.points.map(q => ({ x: q.x + dx, y: q.y + dy }));
+      else { s.x1 = o.x1 + dx; s.y1 = o.y1 + dy; s.x2 = o.x2 + dx; s.y2 = o.y2 + dy; }
+    }
+    deleteSelected() {
+      if (!this.sel.length) return;
+      this.pushUndo();
+      const set = new Set(this.sel);
+      this.pages[this.page].shapes = this.shapes.filter(s => !set.has(s));
+      this.sel = []; this.commit(); this.render();
+    }
+    selectAll() { this.setTool('move'); this.sel = this.shapes.slice(); this.render(); }
+    nudge(dx, dy) {
+      if (!this.sel.length) return;
+      if (!this._nudgeT) this.pushUndo();
+      clearTimeout(this._nudgeT); this._nudgeT = setTimeout(() => { this._nudgeT = null; }, 700);
+      this.sel.forEach(s => this.moveShape(s, JSON.parse(JSON.stringify(s)), dx, dy));
+      this.commit(); this.render();
+    }
+    serializeSel() { return 'FORMYLA-WB:' + JSON.stringify(this.sel.map(s => JSON.parse(JSON.stringify(s)))); }
+    copySel(e) {
+      if (!this.sel.length) return false;
+      const data = this.serializeSel();
+      this.clip = data;
+      if (e && e.clipboardData) { e.clipboardData.setData('text/plain', data); e.preventDefault(); }
+      window.toast && toast(`Скопировано фигур: ${this.sel.length}`, 'ok', 1500);
+      return true;
+    }
+    cutSel(e) { if (this.copySel(e)) this.deleteSelected(); }
+    pasteShapes(data, offset) {
+      let arr; try { arr = JSON.parse(data.slice('FORMYLA-WB:'.length)); } catch (err) { return false; }
+      if (!Array.isArray(arr) || !arr.length) return false;
+      this.pasteN = (this.pasteN || 0) + 1;
+      const d = offset ? 24 * this.pasteN : 0;
+      this.pushUndo();
+      const made = arr.map(o => { const n = JSON.parse(JSON.stringify(o)); n.id = Date.now() + Math.random(); this.moveShape(n, o, d, d); return n; });
+      made.forEach(n => this.shapes.push(n));
+      this.setTool('move'); this.sel = made;
+      this.commit(); this.render();
+      return true;
+    }
+    duplicateSel() {
+      if (!this.sel.length) return;
+      this.pasteN = 0;
+      this.pasteShapes(this.serializeSel(), true);
+    }
 
     /* ---------- вставка изображений (Ctrl+V) ---------- */
     imgFor(src) {
@@ -553,7 +628,7 @@
     }
     pushUndo() { const pg = this.pages[this.page]; pg.undo.push(JSON.stringify(pg.shapes)); if (pg.undo.length > 60) pg.undo.shift(); pg.redo = []; }
     undo() { const pg = this.pages[this.page]; if (!pg.undo.length) return; pg.redo.push(JSON.stringify(pg.shapes)); pg.shapes = JSON.parse(pg.undo.pop()); this.selected = null; this.commit(); this.render(); }
-    redo() { const pg = this.pages[this.page]; if (!pg.redo.length) return; pg.undo.push(JSON.stringify(pg.shapes)); pg.shapes = JSON.parse(pg.redo.pop()); this.commit(); this.render(); }
+    redo() { const pg = this.pages[this.page]; if (!pg.redo.length) return; pg.undo.push(JSON.stringify(pg.shapes)); pg.shapes = JSON.parse(pg.redo.pop()); this.selected = null; this.commit(); this.render(); }
     clearPage() { if (!this.shapes.length) return; this.pushUndo(); this.pages[this.page].shapes = []; this.selected = null; this.commit(); this.render(); }
 
     /* ---------- отрисовка ---------- */
@@ -566,8 +641,8 @@
       ctx.translate(this.panX, this.panY); ctx.scale(this.zoom, this.zoom);
       for (const s of this.shapes) this.drawShape(ctx, s);
       if (this.drawing) this.drawShape(ctx, this.drawing);
-      if (this.selected) {
-        const b = this.bounds(this.selected);
+      for (const sh of this.sel) {
+        const b = this.bounds(sh);
         ctx.save(); ctx.strokeStyle = '#6d28d9'; ctx.lineWidth = 1.5 / this.zoom; ctx.setLineDash([6 / this.zoom, 4 / this.zoom]);
         ctx.strokeRect(b.x1 - 6, b.y1 - 6, b.x2 - b.x1 + 12, b.y2 - b.y1 + 12); ctx.restore();
       }
