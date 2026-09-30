@@ -2,6 +2,7 @@
 (function () {
   const COLORS = ['#0f172a', '#ef4444', '#f59e0b', '#22c55e', '#38bdf8', '#8b5cf6', '#ec4899', '#ffffff'];
   const SIZES = [2, 4, 8, 14];
+  const ERASER_SIZES = [8, 16, 32, 64];   // радиус ластика в пикселях экрана
   const NOTE_COLORS = ['#fef08a', '#bbf7d0', '#bae6fd', '#e9d5ff', '#fecdd3'];
   const STAMPS = ['👍', '✅', '❗', '🔥', '💡', '⭐', '🎯', '❤️'];
   const PIE_COLORS = ['#6d28d9', '#38bdf8', '#22c55e', '#f59e0b', '#ef4444', '#8b5cf6', '#14b8a6', '#ec4899'];
@@ -24,6 +25,8 @@
       this.tool = 'pen';
       this.color = COLORS[0];
       this.size = SIZES[1];
+      this.eraserSize = ERASER_SIZES[1];
+      this.eraserPos = null;          // позиция курсора ластика (экранные координаты)
       this.fill = false;
       this.noteColor = NOTE_COLORS[0];
       this.stamp = STAMPS[0];
@@ -52,7 +55,7 @@
           <div class="wb-title">${this.overlay ? `${icon('pen')} <span class="wb-annot-label">${this.title}</span>` : `${icon('board')} <input type="text" value="${this.title}" aria-label="Название доски">`}</div>
           <div class="wb-tools">
             <button class="wb-tool" data-tool="move" title="Перемещение / выделение (V)">${icon('cursor')}</button>
-            <button class="wb-tool active" data-tool="pen" title="Перо (P)">${icon('pen')}</button>
+            <button class="wb-tool active" data-tool="pen" title="Перо (P) · правая кнопка мыши — перемещение по доске">${icon('pen')}</button>
             <button class="wb-tool" data-tool="highlighter" title="Маркер (H)">${icon('highlighter')}</button>
             <button class="wb-tool" data-tool="line" title="Линия (L)">${icon('line')}</button>
             <button class="wb-tool" data-tool="arrow" title="Стрелка (A)">${icon('arrow')}</button>
@@ -66,6 +69,7 @@
             <button class="wb-tool" data-tool="stamp" title="Штамп-эмодзи (M)">${icon('smile')}</button>
             <button class="wb-tool" data-tool="chart" title="Диаграмма (C) — данные бизнеса">${icon('chart')}</button>
             <button class="wb-tool" data-tool="eraser" title="Ластик (E)">${icon('eraser')}</button>
+            <span class="wb-palette wb-eraser-palette">${ERASER_SIZES.map((s, i) => `<button data-eraser-size="${s}" class="${i === 1 ? 'active' : ''}" title="Размер ластика: ${s * 2}px"><i style="width:${8 + i * 7}px;height:${8 + i * 7}px"></i></button>`).join('')}</span>
             <span class="wb-palette wb-note-palette">${NOTE_COLORS.map(c => `<button data-note-color="${c}" style="background:${c}" title="Цвет стикера"></button>`).join('')}</span>
             <span class="wb-palette wb-stamp-palette">${STAMPS.map(e => `<button data-stamp="${e}">${e}</button>`).join('')}</span>
             <button class="wb-tool" data-tool="laser" title="Лазерная указка">${icon('laser')}</button>
@@ -113,6 +117,11 @@
         this.noteColor = b.dataset.noteColor;
         r.querySelectorAll('[data-note-color]').forEach(x => x.classList.toggle('active', x === b));
       }));
+      r.querySelectorAll('[data-eraser-size]').forEach(b => b.addEventListener('click', () => {
+        this.eraserSize = +b.dataset.eraserSize;
+        r.querySelectorAll('[data-eraser-size]').forEach(x => x.classList.toggle('active', x === b));
+        this.render();
+      }));
       r.querySelectorAll('[data-stamp]').forEach(b => b.addEventListener('click', () => {
         this.stamp = b.dataset.stamp;
         r.querySelectorAll('[data-stamp]').forEach(x => x.classList.toggle('active', x === b));
@@ -137,7 +146,8 @@
       c.addEventListener('pointerdown', e => this.down(e));
       c.addEventListener('pointermove', e => this.move(e));
       c.addEventListener('pointerup', e => this.up(e));
-      c.addEventListener('pointerleave', e => this.up(e));
+      c.addEventListener('pointerleave', e => { this.eraserPos = null; if (this.tool === 'eraser') this.render(); this.up(e); });
+      c.addEventListener('contextmenu', e => e.preventDefault());
       c.addEventListener('wheel', e => {
         e.preventDefault();
         if (e.ctrlKey || e.metaKey) {
@@ -147,8 +157,7 @@
       }, { passive: false });
       c.addEventListener('dblclick', e => {
         const hit = this.hitTest(this.toWorld(e.offsetX, e.offsetY));
-        if (hit && hit.type === 'chart') { this.editChart(hit); return; }
-        if (this.tool !== 'text' && this.tool !== 'note') { this.startText(e, 'text'); }
+        if (hit && hit.type === 'chart') this.editChart(hit);
       });
 
       this.keyHandler = e => {
@@ -201,6 +210,7 @@
       this.wrap.className = `wb-canvas-wrap ${this.bg} tool-${t}`;
       const np = this.root.querySelector('.wb-note-palette'); if (np) np.classList.toggle('show', t === 'note');
       const sp = this.root.querySelector('.wb-stamp-palette'); if (sp) sp.classList.toggle('show', t === 'stamp');
+      const ep = this.root.querySelector('.wb-eraser-palette'); if (ep) ep.classList.toggle('show', t === 'eraser');
       if (t !== 'move') { this.selected = null; this.render(); }
       this.hideLaser();
     }
@@ -264,7 +274,7 @@
       if (a === 'delPage' && this.pages.length > 1) { this.pages.splice(this.page, 1); this.page = Math.max(0, this.page - 1); }
       if (a === 'exportPng') this.exportPng();
       if (a === 'exportJson') this.exportJson();
-      if (a === 'shortcuts') window.toast && toast('V — выделение, P — перо, H — маркер, L — линия, A — стрелка, B — двойная стрелка, R — прямоугольник, O — эллипс, D — ромб, T — текст, N — стикер, M — штамп, C — диаграмма, E — ластик, Ctrl+Z / Ctrl+Y — отмена/повтор, Ctrl+колесо — масштаб, Ctrl+V — вставить фото из буфера, двойной клик — текст, двойной клик по диаграмме — данные', 'ok', 10000);
+      if (a === 'shortcuts') window.toast && toast('V — выделение, P — перо, H — маркер, L — линия, A — стрелка, B — двойная стрелка, R — прямоугольник, O — эллипс, D — ромб, T — текст, N — стикер, M — штамп, C — диаграмма, E — ластик (размер — на панели рядом), Ctrl+Z / Ctrl+Y — отмена/повтор, Ctrl+колесо — масштаб, правая кнопка мыши — перемещение по доске, Ctrl+V — вставить фото из буфера, двойной клик по диаграмме — данные', 'ok', 10000);
       this.renderPages(); this.render();
       if (a === 'addPage' || a === 'dupPage' || a === 'delPage') this.commit();
     }
@@ -308,7 +318,9 @@
 
     /* ---------- ввод ---------- */
     down(e) {
-      if (e.button === 1 || (e.button === 0 && e.altKey) || (this.tool === 'move' && !this.hitTest(this.toWorld(e.offsetX, e.offsetY)))) {
+      // правая кнопка мыши (противоположная кнопке рисования) — перемещение по доске при любом инструменте
+      if (e.button === 2 || e.button === 1 || (e.button === 0 && e.altKey) || (this.tool === 'move' && !this.hitTest(this.toWorld(e.offsetX, e.offsetY)))) {
+        if (e.button === 2) e.preventDefault();
         this.panning = { x: e.offsetX, y: e.offsetY, px: this.panX, py: this.panY }; this.selected = null; this.render(); return;
       }
       this.canvas.setPointerCapture(e.pointerId);
@@ -316,7 +328,7 @@
       const t = this.tool;
       if (t === 'laser') { this.showLaser(e.offsetX, e.offsetY); this.laserOn = true; return; }
       if (t === 'text' || t === 'note') { this.startText(e, t); return; }
-      if (t === 'eraser') { this.eraseAt(p); this.erasing = true; return; }
+      if (t === 'eraser') { this.eraseUndoDone = false; this.eraserPos = { x: e.offsetX, y: e.offsetY }; this.erasing = true; this.eraseAt(p); return; }
       if (t === 'stamp') {
         this.pushUndo();
         this.shapes.push({ id: Date.now() + Math.random(), type: 'stamp', x1: p.x, y1: p.y, x2: p.x + 64, y2: p.y + 64, text: this.stamp || '👍', color: this.color, size: 4 });
@@ -335,6 +347,7 @@
       if (this.panning) { this.panX = this.panning.px + (e.offsetX - this.panning.x); this.panY = this.panning.py + (e.offsetY - this.panning.y); this.render(); return; }
       const p = this.toWorld(e.offsetX, e.offsetY);
       if (this.opts.onCursor) { const t = Date.now(); if (!this._curT || t - this._curT > 90) { this._curT = t; this.opts.onCursor(p); } else { clearTimeout(this._curTm); this._curTm = setTimeout(() => { this._curT = Date.now(); this.opts.onCursor(p); }, 100); } }
+      if (this.tool === 'eraser') { this.eraserPos = { x: e.offsetX, y: e.offsetY }; if (!this.erasing) { this.render(); return; } }
       if (this.tool === 'laser') { if (this.laserOn || true) this.showLaser(e.offsetX, e.offsetY); return; }
       if (this.erasing) { this.eraseAt(p); return; }
       if (this.dragging && this.selected) {
@@ -422,9 +435,70 @@
       }
       return null;
     }
+    /* ---------- ластик: стирается только то, что реально касается круга ластика ---------- */
+    distSeg(p, a, b) {
+      const dx = b.x - a.x, dy = b.y - a.y, l2 = dx * dx + dy * dy;
+      if (!l2) return Math.hypot(p.x - a.x, p.y - a.y);
+      let t = ((p.x - a.x) * dx + (p.y - a.y) * dy) / l2;
+      t = Math.max(0, Math.min(1, t));
+      return Math.hypot(p.x - (a.x + t * dx), p.y - (a.y + t * dy));
+    }
+    outlineSegs(s) {
+      const { x1, y1, x2, y2 } = s;
+      if (s.type === 'rect') return [[{ x: x1, y: y1 }, { x: x2, y: y1 }], [{ x: x2, y: y1 }, { x: x2, y: y2 }], [{ x: x2, y: y2 }, { x: x1, y: y2 }], [{ x: x1, y: y2 }, { x: x1, y: y1 }]];
+      if (s.type === 'triangle') { const m = { x: (x1 + x2) / 2, y: y1 }, l = { x: x1, y: y2 }, r = { x: x2, y: y2 }; return [[m, r], [r, l], [l, m]]; }
+      if (s.type === 'diamond') { const t = { x: (x1 + x2) / 2, y: y1 }, ri = { x: x2, y: (y1 + y2) / 2 }, bo = { x: (x1 + x2) / 2, y: y2 }, l = { x: x1, y: (y1 + y2) / 2 }; return [[t, ri], [ri, bo], [bo, l], [l, t]]; }
+      return [];
+    }
+    arrowHeadSegs(s) {
+      // наконечники стрелок тоже стираются, а не только основной отрезок
+      const { x1, y1, x2, y2 } = s, h = 10 + s.size * 2, a = Math.atan2(y2 - y1, x2 - x1);
+      const headSegs = (px, py, ang) => [
+        [{ x: px, y: py }, { x: px - h * Math.cos(ang - Math.PI / 6), y: py - h * Math.sin(ang - Math.PI / 6) }],
+        [{ x: px, y: py }, { x: px - h * Math.cos(ang + Math.PI / 6), y: py - h * Math.sin(ang + Math.PI / 6) }]
+      ];
+      const segs = [[{ x: x1, y: y1 }, { x: x2, y: y2 }], ...headSegs(x2, y2, a)];
+      if (s.type === 'darrow') segs.push(...headSegs(x1, y1, a + Math.PI));
+      return segs;
+    }
+    shapeErased(s, p, r) {
+      const tol = r + (s.size || 0) / 2;
+      if (s.points) {
+        for (let i = 1; i < s.points.length; i++) if (this.distSeg(p, s.points[i - 1], s.points[i]) < tol) return true;
+        return false;
+      }
+      if (s.type === 'line') return this.distSeg(p, { x: s.x1, y: s.y1 }, { x: s.x2, y: s.y2 }) < tol;
+      if (s.type === 'arrow' || s.type === 'darrow') return this.arrowHeadSegs(s).some(([a, b]) => this.distSeg(p, a, b) < tol);
+      const b = this.bounds(s), bx1 = Math.min(b.x1, b.x2), bx2 = Math.max(b.x1, b.x2), by1 = Math.min(b.y1, b.y2), by2 = Math.max(b.y1, b.y2);
+      const inBox = (pad = tol) => p.x >= bx1 - pad && p.x <= bx2 + pad && p.y >= by1 - pad && p.y <= by2 + pad;
+      if (s.type === 'rect' || s.type === 'triangle' || s.type === 'diamond') {
+        if (s.fill) return inBox();   // залитая фигура занимает всю площадь внутри рамки
+        return this.outlineSegs(s).some(([a, c]) => this.distSeg(p, a, c) < tol);
+      }
+      if (s.type === 'ellipse') {
+        const cx = (bx1 + bx2) / 2, cy = (by1 + by2) / 2, rx = (bx2 - bx1) / 2, ry = (by2 - by1) / 2;
+        if (!rx || !ry) return inBox(0);
+        if (s.fill) { const dxn = (p.x - cx) / (rx + tol), dyn = (p.y - cy) / (ry + tol); if (dxn * dxn + dyn * dyn <= 1) return true; }
+        const N = 48;
+        for (let i = 0; i < N; i++) {
+          const a1 = i / N * Math.PI * 2, a2 = (i + 1) / N * Math.PI * 2;
+          if (this.distSeg(p, { x: cx + rx * Math.cos(a1), y: cy + ry * Math.sin(a1) }, { x: cx + rx * Math.cos(a2), y: cy + ry * Math.sin(a2) }) < tol) return true;
+        }
+        return false;
+      }
+      // текст, стикер, штамп, диаграмма, изображение — по занимаемой площади
+      return inBox();
+    }
     eraseAt(p) {
-      const s = this.hitTest(p);
-      if (s) { if (!this.eraseUndoPushed) { this.pushUndo(); this.eraseUndoPushed = true; setTimeout(() => this.eraseUndoPushed = false, 600); } this.shapes.splice(this.shapes.indexOf(s), 1); this.render(); }
+      const r = this.eraserSize / this.zoom;
+      let removed = false;
+      for (let i = this.shapes.length - 1; i >= 0; i--) {
+        if (this.shapeErased(this.shapes[i], p, r)) {
+          if (!this.eraseUndoDone) { this.pushUndo(); this.eraseUndoDone = true; }
+          this.shapes.splice(i, 1); removed = true;
+        }
+      }
+      if (removed) this.render();
     }
     deleteSelected() { if (this.selected) { this.pushUndo(); this.shapes.splice(this.shapes.indexOf(this.selected), 1); this.selected = null; this.commit(); this.render(); } }
 
@@ -498,6 +572,19 @@
         ctx.strokeRect(b.x1 - 6, b.y1 - 6, b.x2 - b.x1 + 12, b.y2 - b.y1 + 12); ctx.restore();
       }
       ctx.restore();
+      // курсор ластика: круг выбранного размера виден при наведении и при стирании
+      if (this.tool === 'eraser' && this.eraserPos) {
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(this.eraserPos.x, this.eraserPos.y, this.eraserSize, 0, Math.PI * 2);
+        ctx.fillStyle = this.erasing ? 'rgba(109,40,217,.22)' : 'rgba(15,23,42,.07)';
+        ctx.fill();
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([5, 4]);
+        ctx.strokeStyle = this.erasing ? '#6d28d9' : '#475569';
+        ctx.stroke();
+        ctx.restore();
+      }
     }
     drawShape(ctx, s) {
       ctx.save();

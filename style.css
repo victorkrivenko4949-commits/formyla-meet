@@ -534,7 +534,7 @@ body.in-meeting .toasts { bottom: 100px; right: auto; left: 50%; transform: tran
 .wb-canvas-wrap.tool-text, .wb-canvas-wrap.tool-note { cursor: text; }
 .wb-canvas-wrap.tool-pan { cursor: grab; }
 .wb-canvas-wrap.tool-laser { cursor: none; }
-.wb-canvas-wrap.tool-eraser { cursor: cell; }
+.wb-canvas-wrap.tool-eraser { cursor: none; }
 .wb-textbox { position: absolute; min-width: 120px; padding: 6px 8px; font: 600 18px var(--font); color: #0f172a; background: rgba(255,255,255,.9); border: 1px dashed #6d28d9; border-radius: 6px; outline: none; z-index: 5; }
 .wb-bottom { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 6px 12px; background: #fff; border-top: 1px solid #e2e8f0; font-size: 13px; color: #475569; flex-wrap: wrap; }
 .wb-pages { display: flex; align-items: center; gap: 4px; }
@@ -666,6 +666,8 @@ body.in-meeting .toasts { bottom: 100px; right: auto; left: 50%; transform: tran
 .wb-note-palette button { border-radius: 50%; width: 26px; height: 26px; border: 2px solid #fff; box-shadow: 0 0 0 1px #cbd5e1; }
 .wb-note-palette button.active { box-shadow: 0 0 0 2px #6d28d9; transform: scale(1.12); }
 .wb-stamp-palette button.active { border-color: #6d28d9; }
+.wb-eraser-palette button i { display: block; background: currentColor; border-radius: 50%; }
+.wb-eraser-palette button.active { background: #ede9fe; color: #6d28d9; box-shadow: 0 0 0 1px #c4b5fd inset; }
 .wb-chart-editor { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 30; width: min(420px, 90%); background: #fff; border: 1px solid #e2e8f0; border-radius: 14px; box-shadow: 0 20px 48px rgba(15,23,42,.25); padding: 16px; display: flex; flex-direction: column; gap: 10px; }
 .wb-chart-editor h5 { font-size: 15px; font-weight: 900; display: flex; gap: 8px; align-items: center; margin: 0; }
 .wb-chart-editor h5 svg { width: 17px; height: 17px; color: #6d28d9; }
