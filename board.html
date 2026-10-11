@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#6d28d9">
+<title>FORMYLA Доска — офлайн</title>
+<style>
+  html, body { height: 100%; margin: 0; overflow: hidden; background: #fbfbfe; font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  #app { position: fixed; inset: 0; }
+</style>
+</head>
+<body>
+<div id="app"></div>
+<script src="whiteboard.js"></script>
+<script>
+(function () {
+  var KEY = 'formyla-board-offline';
+  var first = !localStorage.getItem(KEY);
+  var wb = new Whiteboard(document.getElementById('app'), { title: 'Моя доска', storageKey: KEY, standalone: true });
+  window.wb = wb;
+  window.addEventListener('beforeunload', function () { wb.saveLocal(); });
+  document.addEventListener('visibilitychange', function () { if (document.hidden) wb.saveLocal(); });
+  if (first) setTimeout(function () { wb.say('Доска работает офлайн и сохраняется в этом браузере автоматически. Меню → «Сохранить в .json», чтобы перенести на другое устройство', 'ok', 7000); }, 600);
+})();
+</script>
+</body>
+</html>
