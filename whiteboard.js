@@ -1,8 +1,6 @@
 /* whiteboard.js — FORMYLA интерактивная доска v2 (ядро: константы, иконки, стили + загрузчик частей из папки wb/)
    API совместим с прежней версией: new Whiteboard(root, { title, overlay, onClose, onChange, onCursor, collaborators, fitSpace, underlay })
-   Новое в v2: ластик с всегда видимым курсором и режимом «штрих» (стирает только задетую часть линии), рамочное выделение,
-   ручки изменения размера, правка текста/стикера двойным кликом, горячие клавиши в любой раскладке, пинч-зум,
-   перетаскивание картинок и .json на доску, автосохранение (opts.storageKey), офлайн-режим (board.html). */
+   Части грузятся параллельно и не блокируют страницу; до их готовности window.Whiteboard — заглушка, window.__WB.ready — Promise. */
 (function () {
   'use strict';
   const COLORS = ['#0f172a', '#ef4444', '#f59e0b', '#22c55e', '#38bdf8', '#8b5cf6', '#ec4899', '#ffffff'];
@@ -28,7 +26,6 @@
   const uid = () => Date.now() + Math.random();
   const esc = s => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
-
   const svg = p => `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${p}</svg>`;
   const ICONS = {
     board: svg('<rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/>'),
@@ -75,10 +72,9 @@
     file: svg('<path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M14 3v6h6"/>'),
   };
   const ic = n => {
-    try { if (typeof window.icon === 'function') { const r = window.icon(n); if (typeof r === 'string' && r.indexOf('<svg') >= 0) return r; } } catch (e) { /* внешних иконок нет */ }
+    try { if (typeof window.icon === 'function') { const r = window.icon(n); if (typeof r === 'string' && r.indexOf('<svg') >= 0) return r; } } catch (e) { }
     return ICONS[n] || '';
   };
-
   const TOOL_GROUPS = [
     [['move', 'cursor', 'Выделение и перемещение (V)'], ['hand', 'hand', 'Рука — двигать холст (или удерживайте пробел / правую кнопку мыши)']],
     [['pen', 'pen', 'Перо (P)'], ['highlighter', 'highlighter', 'Маркер (H)'], ['eraser', 'eraser', 'Ластик (E) · размер — [ и ]']],
@@ -106,7 +102,6 @@
     chart: 'Растяните область — откроется редактор данных. Двойной клик по диаграмме — изменить',
     laser: 'Указка видна участникам. Ничего не рисует',
   };
-
   const CSS = `
 .wb.wb-v2{display:flex;flex-direction:column;height:100%;min-height:0;background:#fbfbfe;color:#0f172a;font:14px/1.3 ${FONT};position:relative;box-sizing:border-box}
 .wb-v2 *,.wb-v2 *::before,.wb-v2 *::after{box-sizing:border-box}
@@ -218,20 +213,41 @@
 `;
   function injectCss() {
     if (document.getElementById('wb-v2-css')) return;
-    // Внутри сайта FORMYLA.net раздел живёт в #fm, где кнопки сброшены правилом «#fm button{all:unset}» — усиливаем селекторы префиксом #fm
     const pre = document.getElementById('fm') ? '#fm ' : '';
     const st = document.createElement('style'); st.id = 'wb-v2-css';
     st.textContent = pre ? CSS.replace(/(^|\n|\{)(\.wb)/g, '$1' + pre + '$2') : CSS;
     document.head.appendChild(st);
   }
   window.__WB = { COLORS, SIZES, NOTE_COLORS, STAMPS, PIE_COLORS, TEMPLATES, BGS, FONT, EMOJI_FONT, MIN_ZOOM, MAX_ZOOM, LINE_TYPES, clone, uid, esc, clamp, ic, TOOL_GROUPS, TOOL_NAMES, HINTS, injectCss };
+
+  /* Заглушка на случай, если доску открыли раньше, чем догрузились части (обычно это доли секунды) */
+  if (typeof window.Whiteboard !== 'function') {
+    const Stub = function (root, opts) {
+      this.root = root; this.opts = opts || {}; this.title = this.opts.title || 'Доска';
+      this.pages = [{ shapes: [], undo: [], redo: [] }]; this.page = 0; this.bg = 'dots'; this.zoom = 1; this.panX = 0; this.panY = 0; this.tool = 'pen'; this.sel = [];
+      try { root.innerHTML = '<div style="padding:24px;color:#64748b;font:600 14px system-ui,sans-serif">Доска загружается… Закройте и откройте её ещё раз через пару секунд.</div>'; } catch (e) { }
+    };
+    ['destroy', 'render', 'renderPages', 'setTool', 'updateZoomLabel', 'setCursor', 'removeCursor', 'startCollabCursors', 'resize', 'applyTemplate', 'importJson', 'saveLocal', 'say'].forEach(m => { Stub.prototype[m] = function () { }; });
+    Stub.prototype.snapshot = function () { return ''; };
+    Object.defineProperty(Stub.prototype, 'shapes', { get() { return this.pages[this.page].shapes; } });
+    Stub.isStub = true;
+    window.Whiteboard = Stub;
+  }
+
+  /* Части модуля: качаются параллельно, выполняются по порядку (async=false), страницу не блокируют */
   const PARTS = ["wb/whiteboard.part1.js", "wb/whiteboard.part2.js", "wb/whiteboard.part3.js", "wb/whiteboard.part4.js", "wb/whiteboard.part5.js", "wb/whiteboard.part6.js", "wb/whiteboard.part7.js"];
   const cs = document.currentScript;
   const base = cs && cs.src ? cs.src.replace(/[^/]*$/, '') : '';
-  const ver = '?v=2.0.1';
-  if (document.readyState === 'loading' && cs && !cs.async && !cs.defer) {
-    PARTS.forEach(p => document.write('<script src="' + base + p + ver + '"><\\/script>'));
-  } else {
-    (function next(i) { if (i >= PARTS.length) return; const s = document.createElement('script'); s.src = base + PARTS[i] + ver; s.onload = () => next(i + 1); document.head.appendChild(s); })(0);
-  }
+  const ver = '?v=2.0.2';
+  window.__WB.ready = new Promise(resolve => {
+    let done = 0;
+    const fin = () => { if (++done === PARTS.length) resolve(); };
+    try {
+      PARTS.forEach(p => {
+        const s = document.createElement('script');
+        s.src = base + p + ver; s.async = false; s.onload = fin; s.onerror = fin;
+        (document.head || document.documentElement).appendChild(s);
+      });
+    } catch (e) { resolve(); }
+  });
 })();

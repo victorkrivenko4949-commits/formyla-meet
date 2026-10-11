@@ -16,12 +16,15 @@
 <script>
 (function () {
   var KEY = 'formyla-board-offline';
-  var first = !localStorage.getItem(KEY);
-  var wb = new Whiteboard(document.getElementById('app'), { title: 'Моя доска', storageKey: KEY, standalone: true });
-  window.wb = wb;
-  window.addEventListener('beforeunload', function () { wb.saveLocal(); });
-  document.addEventListener('visibilitychange', function () { if (document.hidden) wb.saveLocal(); });
-  if (first) setTimeout(function () { wb.say('Доска работает офлайн и сохраняется в этом браузере автоматически. Меню → «Сохранить в .json», чтобы перенести на другое устройство', 'ok', 7000); }, 600);
+  var ready = (window.__WB && window.__WB.ready) || Promise.resolve();
+  ready.then(function () {
+    var first = !localStorage.getItem(KEY);
+    var wb = new Whiteboard(document.getElementById('app'), { title: 'Моя доска', storageKey: KEY, standalone: true });
+    window.wb = wb;
+    window.addEventListener('beforeunload', function () { wb.saveLocal(); });
+    document.addEventListener('visibilitychange', function () { if (document.hidden) wb.saveLocal(); });
+    if (first) setTimeout(function () { wb.say('Доска работает офлайн и сохраняется в этом браузере автоматически. Меню → «Сохранить в .json», чтобы перенести на другое устройство', 'ok', 7000); }, 600);
+  });
 })();
 </script>
 </body>
