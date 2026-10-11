@@ -218,13 +218,17 @@
 `;
   function injectCss() {
     if (document.getElementById('wb-v2-css')) return;
-    const st = document.createElement('style'); st.id = 'wb-v2-css'; st.textContent = CSS; document.head.appendChild(st);
+    // Внутри сайта FORMYLA.net раздел живёт в #fm, где кнопки сброшены правилом «#fm button{all:unset}» — усиливаем селекторы префиксом #fm
+    const pre = document.getElementById('fm') ? '#fm ' : '';
+    const st = document.createElement('style'); st.id = 'wb-v2-css';
+    st.textContent = pre ? CSS.replace(/(^|\n|\{)(\.wb)/g, '$1' + pre + '$2') : CSS;
+    document.head.appendChild(st);
   }
   window.__WB = { COLORS, SIZES, NOTE_COLORS, STAMPS, PIE_COLORS, TEMPLATES, BGS, FONT, EMOJI_FONT, MIN_ZOOM, MAX_ZOOM, LINE_TYPES, clone, uid, esc, clamp, ic, TOOL_GROUPS, TOOL_NAMES, HINTS, injectCss };
   const PARTS = ["wb/whiteboard.part1.js", "wb/whiteboard.part2.js", "wb/whiteboard.part3.js", "wb/whiteboard.part4.js", "wb/whiteboard.part5.js", "wb/whiteboard.part6.js", "wb/whiteboard.part7.js"];
   const cs = document.currentScript;
   const base = cs && cs.src ? cs.src.replace(/[^/]*$/, '') : '';
-  const ver = '?v=2.0.0';
+  const ver = '?v=2.0.1';
   if (document.readyState === 'loading' && cs && !cs.async && !cs.defer) {
     PARTS.forEach(p => document.write('<script src="' + base + p + ver + '"><\\/script>'));
   } else {
