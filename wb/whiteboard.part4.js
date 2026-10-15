@@ -1,25 +1,24 @@
 /* FORMYLA доска v2 — часть модуля, подключается из whiteboard.js */
 (function () {
   'use strict';
-  const { COLORS, SIZES, NOTE_COLORS, STAMPS, PIE_COLORS, TEMPLATES, BGS, FONT, EMOJI_FONT, MIN_ZOOM, MAX_ZOOM, LINE_TYPES, clone, uid, esc, clamp, ic, TOOL_GROUPS, TOOL_NAMES, HINTS, injectCss } = window.__WB;
+  const { COLORS, SIZES, NOTE_COLORS, STAMPS, PIE_COLORS, TEMPLATES, BGS, FONT, EMOJI_FONT, MIN_ZOOM, MAX_ZOOM, LINE_TYPES, GEOM_TYPES, FRESH_MS, clone, uid, esc, clamp, ic, TOOL_GROUPS, TOOL_NAMES, HINTS, injectCss } = window.__WB;
   Object.assign(window.Whiteboard.prototype, {
     /* ---------- ввод ---------- */
     down(e) {
       this.pointers.set(e.pointerId, { x: e.offsetX, y: e.offsetY });
       this.closeMenu();
       if (this.pointers.size === 2) {
-        // второй палец — начинаем пинч-зум, текущее рисование отменяем
         this.drawing = null; this.marquee = null; this.dragging = null; this.resizing = null;
         if (this.erasing) { this.erasing = false; this.hideEraser(); }
         const [a, b] = Array.from(this.pointers.values());
         this.pinch = { d: Math.hypot(b.x - a.x, b.y - a.y) || 1, cx: (a.x + b.x) / 2, cy: (a.y + b.y) / 2, zoom: this.zoom, panX: this.panX, panY: this.panY };
-        try { this.canvas.setPointerCapture(e.pointerId); } catch (err) { /* не критично */ }
+        try { this.canvas.setPointerCapture(e.pointerId); } catch (err) { }
         this.render(); return;
       }
       if (this.pointers.size > 2) return;
       this.lastMouse = { x: e.offsetX, y: e.offsetY };
       const isPan = e.button === 2 || e.button === 1 || (e.button === 0 && (e.altKey || this.spaceDown || this.tool === 'hand'));
-      try { this.canvas.setPointerCapture(e.pointerId); } catch (err) { /* не критично */ }
+      try { this.canvas.setPointerCapture(e.pointerId); } catch (err) { }
       if (isPan) {
         e.preventDefault();
         this.panning = { x: e.offsetX, y: e.offsetY, px: this.panX, py: this.panY }; this.wrap.classList.add('panning'); return;
@@ -29,7 +28,7 @@
       const t = this.tool;
       if (t === 'laser') { this.showLaser(e.offsetX, e.offsetY); this.laserOn = true; return; }
       if (t === 'text' || t === 'note') { this.startText(e, t); return; }
-      if (t === 'eraser') {
+      if (this.isEraser(t)) {
         this.eraseUndoDone = false; this.erasing = true; this.eraserPos = { x: e.offsetX, y: e.offsetY }; this.lastErasePt = p;
         this.showEraser(true); this.eraseAt(p, null); return;
       }
@@ -74,7 +73,7 @@
       if (this.panning) { this.panX = this.panning.px + (e.offsetX - this.panning.x); this.panY = this.panning.py + (e.offsetY - this.panning.y); this.render(); return; }
       const p = this.toWorld(e.offsetX, e.offsetY);
       if (this.opts.onCursor) { const t = Date.now(); if (!this._curT || t - this._curT > 90) { this._curT = t; this.opts.onCursor(p); } else { clearTimeout(this._curTm); this._curTm = setTimeout(() => { this._curT = Date.now(); this.opts.onCursor(p); }, 100); } }
-      if (this.tool === 'eraser') {
+      if (this.isEraser()) {
         this.eraserPos = { x: e.offsetX, y: e.offsetY }; this.showEraser(this.erasing);
         if (this.erasing) { this.eraseAt(p, this.lastErasePt); this.lastErasePt = p; }
         return;
@@ -145,7 +144,7 @@
       if (e.ctrlKey || e.metaKey) { const f = clamp(Math.exp(-e.deltaY * 0.0022), 0.7, 1.4); this.zoomAt(f, e.offsetX, e.offsetY); }
       else if (e.shiftKey) { this.panX -= (e.deltaY || e.deltaX); this.render(); this.scheduleSave(); }
       else { this.panX -= e.deltaX; this.panY -= e.deltaY; this.render(); this.scheduleSave(); }
-      if (this.tool === 'eraser') { this.eraserPos = { x: e.offsetX, y: e.offsetY }; this.showEraser(this.erasing); }
+      if (this.isEraser()) { this.eraserPos = { x: e.offsetX, y: e.offsetY }; this.showEraser(this.erasing); }
     },
     dblclick(e) {
       const p = this.toWorld(e.offsetX, e.offsetY);
@@ -166,6 +165,11 @@
       if (mod && letter === 'a') { e.preventDefault(); this.selectAll(); return; }
       if (mod && letter === 'd') { e.preventDefault(); this.duplicateSel(); return; }
       if (mod && letter === 's') { e.preventDefault(); this.exportJson(); return; }
+      /* Ctrl+C / X / V — через клавиши, чтобы работало во всех браузерах (события copy/cut/paste без выделенного
+         текста на странице приходят не везде). Если есть что копировать — перехватываем, иначе отдаём браузеру. */
+      if (mod && letter === 'c') { if (this.sel.length) { e.preventDefault(); this.copySel(null); } return; }
+      if (mod && letter === 'x') { if (this.sel.length) { e.preventDefault(); this.cutSel(null); } return; }
+      if (mod && letter === 'v') { this.pasteFallback(); return; }
       if (mod || e.altKey) return;
       if (e.key === 'Escape') { this.escape(); return; }
       if (e.key === 'Delete' || e.key === 'Backspace') { if (this.sel.length) { e.preventDefault(); this.deleteSelected(); } return; }
@@ -173,13 +177,13 @@
         e.preventDefault(); const st = e.shiftKey ? 10 : 1;
         this.nudge(e.key === 'ArrowLeft' ? -st : e.key === 'ArrowRight' ? st : 0, e.key === 'ArrowUp' ? -st : e.key === 'ArrowDown' ? st : 0); return;
       }
-      if (code === 'BracketLeft') { this.setEraserSize(this.eraserSize - 4); if (this.tool !== 'eraser') this.setTool('eraser'); return; }
-      if (code === 'BracketRight') { this.setEraserSize(this.eraserSize + 4); if (this.tool !== 'eraser') this.setTool('eraser'); return; }
+      if (code === 'BracketLeft') { this.setEraserSize(this.eraserSize - 4); if (!this.isEraser()) this.setTool('eraser'); return; }
+      if (code === 'BracketRight') { this.setEraserSize(this.eraserSize + 4); if (!this.isEraser()) this.setTool('eraser'); return; }
       if (code === 'Equal' || code === 'NumpadAdd' || e.key === '+') { const c = this.viewCenter(); this.zoomAt(1.2, c.x, c.y); return; }
       if (code === 'Minus' || code === 'NumpadSubtract') { const c = this.viewCenter(); this.zoomAt(1 / 1.2, c.x, c.y); return; }
       if (code === 'Digit0' || code === 'Numpad0') { this.action('zoomReset'); return; }
       if (code === 'Digit1' && e.shiftKey) { this.fitAll(); return; }
-      const map = { v: 'move', p: 'pen', h: 'highlighter', e: 'eraser', l: 'line', a: 'arrow', b: 'darrow', r: 'rect', o: 'ellipse', g: 'triangle', d: 'diamond', t: 'text', n: 'note', m: 'stamp', c: 'chart', k: 'laser' };
+      const map = { v: 'move', p: 'pen', h: 'highlighter', e: 'eraser', x: 'eraserShape', l: 'line', a: 'arrow', b: 'darrow', r: 'rect', o: 'ellipse', g: 'triangle', d: 'diamond', t: 'text', n: 'note', m: 'stamp', c: 'chart', k: 'laser' };
       if (map[letter]) { this.setTool(map[letter]); return; }
       if (letter === 'f') { this.action('fill'); return; }
     },
@@ -194,7 +198,7 @@
       this.sel = []; this.render(); this.setHint();
     },
 
-    /* ---------- ластик ---------- */
+    /* ---------- геометрия для ластиков и попадания ---------- */
     strokeHalf(s) { if (s.type === 'highlighter') return (s.size || 2) * 2; if (s.points || LINE_TYPES[s.type]) return (s.size || 2) / 2; return 0; },
     distSeg(p, a, b) {
       const dx = b.x - a.x, dy = b.y - a.y, l2 = dx * dx + dy * dy;
@@ -221,6 +225,7 @@
       if (s.type === 'darrow') segs.push(...head(x1, y1, a + Math.PI));
       return segs;
     },
+    /* задета ли фигура кругом радиуса r с центром p (используется ластиками и hitTest) */
     shapeErased(s, p, r) {
       const tol = r + this.strokeHalf(s);
       if (s.points) { for (let i = 1; i < s.points.length; i++) if (this.distSeg(p, s.points[i - 1], s.points[i]) < tol) return true; return false; }
@@ -245,7 +250,6 @@
       return inBox();
     },
     splitStroke(s, q, r) {
-      // возвращает массив кусочков линии после вырезания круга (пустой — линия стёрта), null — ничего не задето
       const tol = r + this.strokeHalf(s), pts = s.points, n = pts.length;
       const keep = pts.map(pt => Math.hypot(pt.x - q.x, pt.y - q.y) > tol);
       let touched = keep.some(k => !k);
@@ -260,6 +264,13 @@
       if (!touched) return null;
       return pieces.map(pc => ({ ...s, id: uid(), points: pc }));
     },
+
+    /* ---------- два ластика ----------
+       'eraser'      — ластик для рисунков: трогает ТОЛЬКО штрихи пера и маркера (s.points).
+                       режим 'stroke' — вырезает задетый кусок, 'object' — удаляет весь штрих.
+       'eraserShape' — ластик для фигур: удаляет ТОЛЬКО ровные линии, стрелки и геометрические фигуры целиком.
+       Текст, стикеры, картинки, штампы и диаграммы ластики не трогают — их удаляют выделением (V) + Delete,
+       поэтому случайно стереть подпись или сообщение на доске ластиком больше нельзя. */
     eraseAt(p, prev) {
       const r = this.eraserSize / this.zoom;
       const samples = [];
@@ -269,14 +280,23 @@
       } else samples.push(p);
       let changed = false;
       const ensure = () => { if (!this.eraseUndoDone) { this.pushUndo(); this.eraseUndoDone = true; } };
+      const shapeMode = this.tool === 'eraserShape';
       for (const q of samples) {
         const shapes = this.shapes;
         for (let i = shapes.length - 1; i >= 0; i--) {
           const s = shapes[i];
-          if (this.eraserMode === 'stroke' && s.points) {
-            const res = this.splitStroke(s, q, r);
-            if (res) { ensure(); shapes.splice(i, 1, ...res); changed = true; }
-          } else if (this.shapeErased(s, q, r)) { ensure(); shapes.splice(i, 1); changed = true; }
+          if (shapeMode) {
+            if (!this.isGeom(s)) continue;
+            if (this.shapeErased(s, q, r)) { ensure(); shapes.splice(i, 1); changed = true; }
+          } else {
+            if (!this.isStroke(s)) continue;
+            if (this.eraserMode === 'object') {
+              if (this.shapeErased(s, q, r)) { ensure(); shapes.splice(i, 1); changed = true; }
+            } else {
+              const res = this.splitStroke(s, q, r);
+              if (res) { ensure(); shapes.splice(i, 1, ...res); changed = true; }
+            }
+          }
         }
       }
       if (changed) { this.sel = this.sel.filter(s => this.shapes.includes(s)); this.render(); }
