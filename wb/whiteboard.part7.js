@@ -1,7 +1,7 @@
 /* FORMYLA доска v2 — часть модуля, подключается из whiteboard.js */
 (function () {
   'use strict';
-  const { COLORS, SIZES, NOTE_COLORS, STAMPS, PIE_COLORS, TEMPLATES, BGS, FONT, EMOJI_FONT, MIN_ZOOM, MAX_ZOOM, LINE_TYPES, clone, uid, esc, clamp, ic, TOOL_GROUPS, TOOL_NAMES, HINTS, injectCss } = window.__WB;
+  const { COLORS, SIZES, NOTE_COLORS, STAMPS, PIE_COLORS, TEMPLATES, BGS, FONT, EMOJI_FONT, MIN_ZOOM, MAX_ZOOM, LINE_TYPES, GEOM_TYPES, FRESH_MS, clone, uid, esc, clamp, ic, TOOL_GROUPS, TOOL_NAMES, HINTS, injectCss } = window.__WB;
   Object.assign(window.Whiteboard.prototype, {
     /* ---------- диаграммы ---------- */
     editChart(shape) {
@@ -99,7 +99,7 @@
     applyTemplate(key) {
       const shapes = this.tplShapes(key);
       if (!shapes.length) return;
-      this.pages.push({ shapes, undo: [], redo: [] });
+      this.pages.push(this.mkPage({ shapes }));
       this.page = this.pages.length - 1; this.sel = [];
       this.fitToShapes(shapes);
       this.renderPages(); this.render(); this.commit();
@@ -117,7 +117,7 @@
         const c = off.getContext('2d');
         c.fillStyle = this.overlay ? '#0b1220' : '#ffffff'; c.fillRect(0, 0, W, H);
         const under = this.opts.underlay && this.opts.underlay();
-        if (under && under.videoWidth) { try { const vr = under.videoWidth / under.videoHeight, tr = W / H; let dw = W, dh = H; if (vr > tr) dh = W / vr; else dw = H * vr; c.drawImage(under, (W - dw) / 2, (H - dh) / 2, dw, dh); } catch (e) { /* кадр недоступен */ } }
+        if (under && under.videoWidth) { try { const vr = under.videoWidth / under.videoHeight, tr = W / H; let dw = W, dh = H; if (vr > tr) dh = W / vr; else dw = H * vr; c.drawImage(under, (W - dw) / 2, (H - dh) / 2, dw, dh); } catch (e) { } }
         c.drawImage(this.canvas, 0, 0);
       } else {
         const pad = 40, cw = b.x2 - b.x1 + pad * 2, ch = b.y2 - b.y1 + pad * 2;
@@ -144,7 +144,7 @@
         try {
           const d = JSON.parse(r.result);
           if (!d || !Array.isArray(d.pages)) throw new Error('bad');
-          this.pages = d.pages.map(p => ({ shapes: Array.isArray(p.shapes) ? p.shapes : [], undo: [], redo: [] })); if (!this.pages.length) this.pages = [{ shapes: [], undo: [], redo: [] }];
+          this.replacePages(d.pages.map(p => ({ shapes: Array.isArray(p.shapes) ? p.shapes : [] })));
           this.page = 0; this.sel = [];
           this.title = d.title || this.title; const ti = this.root.querySelector('.wb-title input'); if (ti) ti.value = this.title;
           this.bg = d.bg || this.bg; this.setTool(this.tool); this.renderPages();
