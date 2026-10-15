@@ -1,6 +1,8 @@
-/* whiteboard.js — FORMYLA интерактивная доска v2 (ядро: константы, иконки, стили + загрузчик частей из папки wb/)
+/* whiteboard.js — FORMYLA интерактивная доска v2.1 (ядро: константы, иконки, стили + загрузчик частей из папки wb/)
    API совместим с прежней версией: new Whiteboard(root, { title, overlay, onClose, onChange, onCursor, collaborators, fitSpace, underlay })
-   Части грузятся параллельно и не блокируют страницу; до их готовности window.Whiteboard — заглушка, window.__WB.ready — Promise. */
+   Части грузятся параллельно и не блокируют страницу; до их готовности window.Whiteboard — заглушка, window.__WB.ready — Promise.
+   v2.1: два ластика (для рисунков и для фигур), слияние состояния доски при синхронизации (чужая синхронизация больше не
+   стирает свежие локальные изменения), Ctrl+C / X / V работают через клавиши в любом браузере. */
 (function () {
   'use strict';
   const COLORS = ['#0f172a', '#ef4444', '#f59e0b', '#22c55e', '#38bdf8', '#8b5cf6', '#ec4899', '#ffffff'];
@@ -22,6 +24,10 @@
   const EMOJI_FONT = '"Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", sans-serif';
   const MIN_ZOOM = 0.1, MAX_ZOOM = 8;
   const LINE_TYPES = { line: 1, arrow: 1, darrow: 1 };
+  /* фигуры, которые стирает «ластик для фигур»: ровные линии, стрелки и геометрические фигуры */
+  const GEOM_TYPES = { line: 1, arrow: 1, darrow: 1, rect: 1, ellipse: 1, triangle: 1, diamond: 1 };
+  /* сколько миллисекунд свежее локальное изменение защищено от затирания чужой (запоздавшей) синхронизацией */
+  const FRESH_MS = 8000;
   const clone = o => JSON.parse(JSON.stringify(o));
   const uid = () => Date.now() + Math.random();
   const esc = s => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -45,6 +51,7 @@
     smile: svg('<circle cx="12" cy="12" r="9"/><path d="M8 14s1.5 2 4 2 4-2 4-2M9 9h.01M15 9h.01"/>'),
     chart: svg('<path d="M4 20V10M10 20V4M16 20v-8M22 20H2"/>'),
     eraser: svg('<path d="M20 20H8L3.5 15.5a2 2 0 0 1 0-2.8L13 3.3a2 2 0 0 1 2.8 0l5 5a2 2 0 0 1 0 2.8L13 19"/><path d="M6.5 12.5l6 6"/>'),
+    eraserShape: svg('<path d="M14 20H8L3.5 15.5a2 2 0 0 1 0-2.8L13 3.3a2 2 0 0 1 2.8 0l5 5a2 2 0 0 1 0 2.8L14 17.8"/><path d="M6.5 12.5l6 6"/><path d="M15 21h6M21 15l-5 5" stroke-width="1.6"/>'),
     laser: svg('<circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M5 19l2-2M17 7l2-2"/>'),
     undo: svg('<path d="M9 14L4 9l5-5"/><path d="M4 9h11a5 5 0 0 1 0 10h-3"/>'),
     redo: svg('<path d="M15 14l5-5-5-5"/><path d="M20 9H9a5 5 0 0 0 0 10h3"/>'),
@@ -72,13 +79,14 @@
     file: svg('<path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M14 3v6h6"/>'),
   };
   const ic = n => {
-    try { if (typeof window.icon === 'function') { const r = window.icon(n); if (typeof r === 'string' && r.indexOf('<svg') >= 0) return r; } } catch (e) { }
+    /* свои иконки для новых инструментов — всегда из этого файла; остальные можно переопределить общим icon() сайта */
+    if (n !== 'eraserShape') { try { if (typeof window.icon === 'function') { const r = window.icon(n); if (typeof r === 'string' && r.indexOf('<svg') >= 0) return r; } } catch (e) { } }
     return ICONS[n] || '';
   };
   const TOOL_GROUPS = [
     [['move', 'cursor', 'Выделение и перемещение (V)'], ['hand', 'hand', 'Рука — двигать холст (или удерживайте пробел / правую кнопку мыши)']],
-    [['pen', 'pen', 'Перо (P)'], ['highlighter', 'highlighter', 'Маркер (H)'], ['eraser', 'eraser', 'Ластик (E) · размер — [ и ]']],
-    [['line', 'line', 'Линия (L)'], ['arrow', 'arrow', 'Стрелка (A)'], ['darrow', 'darrow', 'Двойная стрелка (B)'], ['rect', 'square', 'Прямоугольник (R)'], ['ellipse', 'circle', 'Эллипс (O)'], ['triangle', 'triangle', 'Треугольник (G)'], ['diamond', 'diamond', 'Ромб (D)']],
+    [['pen', 'pen', 'Перо (P)'], ['highlighter', 'highlighter', 'Маркер (H)'], ['eraser', 'eraser', 'Ластик для рисунков — стирает только перо и маркер (E) · размер — [ и ]']],
+    [['line', 'line', 'Линия (L)'], ['arrow', 'arrow', 'Стрелка (A)'], ['darrow', 'darrow', 'Двойная стрелка (B)'], ['rect', 'square', 'Прямоугольник (R)'], ['ellipse', 'circle', 'Эллипс (O)'], ['triangle', 'triangle', 'Треугольник (G)'], ['diamond', 'diamond', 'Ромб (D)'], ['eraserShape', 'eraserShape', 'Ластик для фигур — удаляет линии, стрелки и фигуры целиком (X) · размер — [ и ]']],
     [['text', 'type', 'Текст (T)'], ['note', 'note', 'Стикер (N)'], ['stamp', 'smile', 'Штамп-эмодзи (M)'], ['chart', 'chart', 'Диаграмма (C)'], ['laser', 'laser', 'Лазерная указка (K)']],
   ];
   const TOOL_NAMES = {};
@@ -88,7 +96,8 @@
     hand: 'Тяните холст. Ещё: правая/средняя кнопка мыши, пробел+мышь, колесо; Ctrl+колесо — масштаб',
     pen: 'Рисуйте. Shift — прямая линия · Ctrl+Z — отмена · правая кнопка — двигать холст',
     highlighter: 'Полупрозрачный маркер. Shift — прямая линия',
-    eraser: 'Проведите по линии — сотрётся только задетая часть. «Объект» — убирает фигуру целиком. [ и ] — размер',
+    eraser: 'Стирает только нарисованное пером и маркером — линии, фигуры и текст не трогает. «Часть» — стирается задетый кусок, «Целиком» — весь штрих. [ и ] — размер',
+    eraserShape: 'Коснитесь линии, стрелки или фигуры — она удалится целиком. Рисунки пером и текст не трогает (текст и стикеры: выделите (V) и нажмите Delete). [ и ] — размер',
     line: 'Растяните линию. Shift — ровно по 45°',
     arrow: 'Растяните стрелку. Shift — ровно по 45°',
     darrow: 'Растяните двойную стрелку. Shift — ровно по 45°',
@@ -117,6 +126,7 @@
 .wb-v2 .wb-tool svg{width:18px;height:18px}
 .wb-v2 .wb-tool:hover{background:#e2e8f0}
 .wb-v2 .wb-tool.active{background:#6d28d9;color:#fff;box-shadow:0 2px 8px rgba(109,40,217,.35)}
+.wb-v2 .wb-tool[data-tool=eraserShape].active{background:#ea580c;box-shadow:0 2px 8px rgba(234,88,12,.35)}
 .wb-v2 .wb-tool:disabled{opacity:.35;cursor:default;background:transparent}
 .wb-v2 .wb-sep{width:1px;height:24px;background:#e2e8f0;margin:0 4px;flex:none}
 .wb-v2 .wb-colors,.wb-v2 .wb-sizes{display:flex;gap:4px;align-items:center}
@@ -133,6 +143,7 @@
 .wb-v2 .wb-sub input[type=range]{width:150px;accent-color:#6d28d9}
 .wb-v2 .wb-eraser-val{min-width:44px;font-weight:800;color:#0f172a}
 .wb-v2 .wb-eraser-preview{display:inline-block;border-radius:50%;border:2px solid #6d28d9;background:rgba(109,40,217,.15);flex:none}
+.wb-v2 .wb-eraser-preview.shape{border-radius:6px;border-color:#ea580c;background:rgba(234,88,12,.15)}
 .wb-v2 .wb-seg{display:inline-flex;border:1px solid #cbd5e1;border-radius:8px;overflow:hidden;background:#fff}
 .wb-v2 .wb-seg button{border:none;background:#fff;padding:4px 10px;font:inherit;font-weight:600;cursor:pointer;color:#334155}
 .wb-v2 .wb-seg button.active{background:#6d28d9;color:#fff}
@@ -154,12 +165,14 @@
 .wb-v2 .wb-canvas-wrap.tool-hand,.wb-v2 .wb-canvas-wrap.space-pan{cursor:grab}
 .wb-v2 .wb-canvas-wrap.tool-text,.wb-v2 .wb-canvas-wrap.tool-note{cursor:text}
 .wb-v2 .wb-canvas-wrap.tool-stamp{cursor:copy}
-.wb-v2 .wb-canvas-wrap.tool-eraser,.wb-v2 .wb-canvas-wrap.tool-laser{cursor:none}
+.wb-v2 .wb-canvas-wrap.tool-eraser,.wb-v2 .wb-canvas-wrap.tool-eraserShape,.wb-v2 .wb-canvas-wrap.tool-laser{cursor:none}
 .wb-v2 .wb-canvas-wrap.panning{cursor:grabbing!important}
 .wb-v2 .wb-eraser-cursor{position:absolute;border:2px solid #6d28d9;border-radius:50%;background:rgba(109,40,217,.14);pointer-events:none;transform:translate(-50%,-50%);display:none;z-index:4;box-shadow:0 0 0 1px rgba(255,255,255,.95),0 2px 8px rgba(15,23,42,.25)}
 .wb-v2 .wb-eraser-cursor.show{display:block}
+.wb-v2 .wb-eraser-cursor.shape{border-radius:8px;border-color:#ea580c;background:rgba(234,88,12,.14)}
 .wb-v2 .wb-eraser-cursor.down{background:rgba(239,68,68,.25);border-color:#ef4444}
 .wb-v2 .wb-eraser-cursor::after{content:'';position:absolute;left:50%;top:50%;width:4px;height:4px;margin:-2px 0 0 -2px;border-radius:50%;background:#6d28d9}
+.wb-v2 .wb-eraser-cursor.shape::after{background:#ea580c}
 .wb-v2 .wb-eraser-cursor.down::after{background:#ef4444}
 .wb-v2 .wb-laser-dot{position:absolute;width:14px;height:14px;border-radius:50%;background:#ef4444;box-shadow:0 0 0 4px rgba(239,68,68,.3),0 0 18px #ef4444;transform:translate(-50%,-50%);pointer-events:none;z-index:4}
 .wb-v2 .wb-textbox{position:absolute;min-width:60px;font:600 18px ${FONT};color:#0f172a;background:rgba(255,255,255,.92);border:1px dashed #6d28d9;border-radius:6px;outline:none;z-index:5;white-space:pre-wrap;word-break:break-word;line-height:1.3}
@@ -218,7 +231,7 @@
     st.textContent = pre ? CSS.replace(/(^|\n|\{)(\.wb)/g, '$1' + pre + '$2') : CSS;
     document.head.appendChild(st);
   }
-  window.__WB = { COLORS, SIZES, NOTE_COLORS, STAMPS, PIE_COLORS, TEMPLATES, BGS, FONT, EMOJI_FONT, MIN_ZOOM, MAX_ZOOM, LINE_TYPES, clone, uid, esc, clamp, ic, TOOL_GROUPS, TOOL_NAMES, HINTS, injectCss };
+  window.__WB = { COLORS, SIZES, NOTE_COLORS, STAMPS, PIE_COLORS, TEMPLATES, BGS, FONT, EMOJI_FONT, MIN_ZOOM, MAX_ZOOM, LINE_TYPES, GEOM_TYPES, FRESH_MS, clone, uid, esc, clamp, ic, TOOL_GROUPS, TOOL_NAMES, HINTS, injectCss };
 
   /* Заглушка на случай, если доску открыли раньше, чем догрузились части (обычно это доли секунды) */
   if (typeof window.Whiteboard !== 'function') {
@@ -238,7 +251,7 @@
   const PARTS = ["wb/whiteboard.part1.js", "wb/whiteboard.part2.js", "wb/whiteboard.part3.js", "wb/whiteboard.part4.js", "wb/whiteboard.part5.js", "wb/whiteboard.part6.js", "wb/whiteboard.part7.js"];
   const cs = document.currentScript;
   const base = cs && cs.src ? cs.src.replace(/[^/]*$/, '') : '';
-  const ver = '?v=2.0.2';
+  const ver = '?v=2.1.0';
   window.__WB.ready = new Promise(resolve => {
     let done = 0;
     const fin = () => { if (++done === PARTS.length) resolve(); };

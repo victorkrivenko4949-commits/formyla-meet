@@ -1,7 +1,7 @@
 /* FORMYLA доска v2 — часть модуля, подключается из whiteboard.js */
 (function () {
   'use strict';
-  const { COLORS, SIZES, NOTE_COLORS, STAMPS, PIE_COLORS, TEMPLATES, BGS, FONT, EMOJI_FONT, MIN_ZOOM, MAX_ZOOM, LINE_TYPES, clone, uid, esc, clamp, ic, TOOL_GROUPS, TOOL_NAMES, HINTS, injectCss } = window.__WB;
+  const { COLORS, SIZES, NOTE_COLORS, STAMPS, PIE_COLORS, TEMPLATES, BGS, FONT, EMOJI_FONT, MIN_ZOOM, MAX_ZOOM, LINE_TYPES, GEOM_TYPES, FRESH_MS, clone, uid, esc, clamp, ic, TOOL_GROUPS, TOOL_NAMES, HINTS, injectCss } = window.__WB;
   Object.assign(window.Whiteboard.prototype, {
     /* ---------- разметка ---------- */
     build() {
@@ -37,10 +37,11 @@
         </div>
         <div class="wb-sub">
           <span class="wb-sub-eraser">
+            <b class="wb-eraser-title"></b>
             <label>Размер <input type="range" min="4" max="80" step="1" value="${this.eraserSize}" class="wb-eraser-range"> <b class="wb-eraser-val">${this.eraserSize * 2}px</b></label>
             <i class="wb-eraser-preview" style="width:${Math.min(36, this.eraserSize)}px;height:${Math.min(36, this.eraserSize)}px"></i>
-            <span class="wb-seg"><button data-emode="stroke" class="active" title="Стирается только задетая часть линии">Штрих</button><button data-emode="object" title="Удаляется вся фигура, которой коснулись">Объект</button></span>
-            <span class="wb-sub-note">[ и ] — размер · Ctrl+Z — вернуть</span>
+            <span class="wb-seg wb-eraser-modes"><button data-emode="stroke" class="active" title="Стирается только задетый кусок штриха">Часть</button><button data-emode="object" title="Удаляется весь штрих, которого коснулись">Целиком</button></span>
+            <span class="wb-sub-note wb-eraser-note"></span>
           </span>
           <span class="wb-sub-note-color"><label>Цвет стикера</label><span class="wb-palette wb-note-palette show">${NOTE_COLORS.map((c, i) => `<button data-note-color="${c}" class="${i === 0 ? 'active' : ''}" style="background:${c}" title="Цвет стикера"></button>`).join('')}</span></span>
           <span class="wb-sub-stamp"><label>Эмодзи</label><span class="wb-palette wb-stamp-palette show">${STAMPS.map((e, i) => `<button data-stamp="${e}" class="${i === 0 ? 'active' : ''}">${e}</button>`).join('')}</span></span>
@@ -112,7 +113,7 @@
       c.addEventListener('pointerup', e => this.up(e));
       c.addEventListener('pointercancel', e => this.up(e));
       c.addEventListener('lostpointercapture', e => { if (this.pointers.has(e.pointerId)) this.up(e); });
-      c.addEventListener('pointerenter', e => { this.lastMouse = { x: e.offsetX, y: e.offsetY }; if (this.tool === 'eraser') { this.eraserPos = this.lastMouse; this.showEraser(this.erasing); } });
+      c.addEventListener('pointerenter', e => { this.lastMouse = { x: e.offsetX, y: e.offsetY }; if (this.isEraser()) { this.eraserPos = this.lastMouse; this.showEraser(this.erasing); } });
       c.addEventListener('pointerleave', () => { if (!this.erasing) this.hideEraser(); if (!this.laserOn) this.hideLaser(); });
       c.addEventListener('contextmenu', e => e.preventDefault());
       c.addEventListener('wheel', e => this.wheel(e), { passive: false });
@@ -123,21 +124,18 @@
       document.addEventListener('keydown', this.keyHandler);
       document.addEventListener('keyup', this.keyUpHandler);
 
+      /* Буфер обмена. События copy/cut/paste приходят не во всех браузерах, когда на странице ничего не выделено
+         (например, Firefox их не шлёт) — поэтому Ctrl+C / X / V дополнительно обрабатываются в onKey (part4). */
       const inField = e => e.target && e.target.matches && e.target.matches('input, textarea, select, [contenteditable]');
       this.pasteHandler = e => {
         if (!this.root.isConnected || inField(e)) return;
+        this._lastPasteEvt = Date.now();
         const items = e.clipboardData && e.clipboardData.items; if (!items) return;
         const item = Array.from(items).find(it => it.kind === 'file' && it.type && it.type.startsWith('image/'));
         if (!item) {
           const text = e.clipboardData.getData('text/plain') || '';
           if (text.startsWith('FORMYLA-WB:')) { e.preventDefault(); this.pasteShapes(text, true); }
-          else if (text.trim()) {
-            e.preventDefault(); this.pushUndo();
-            const m = this.lastMouse || this.viewCenter();
-            const c0 = this.toWorld(m.x, m.y);
-            const sh = { id: uid(), type: 'text', x1: c0.x, y1: c0.y, x2: c0.x + 10, y2: c0.y + 10, text: text.trim().slice(0, 4000), color: this.color, size: this.size };
-            this.fitText(sh); this.shapes.push(sh); this.setTool('move'); this.sel = [sh]; this.commit(); this.render();
-          }
+          else if (text.trim()) { e.preventDefault(); this.pasteText(text); }
           return;
         }
         const file = item.getAsFile(); if (!file) return;
@@ -166,13 +164,15 @@
     },
 
     destroy() {
+      /* если в момент закрытия/пересоздания доски набирался текст — сохраняем его, а не теряем */
+      if (this.finishText) { try { this.finishText(false); } catch (e) { /* не критично */ } }
       document.removeEventListener('keydown', this.keyHandler);
       document.removeEventListener('keyup', this.keyUpHandler);
       document.removeEventListener('paste', this.pasteHandler);
       document.removeEventListener('copy', this.copyHandler);
       document.removeEventListener('cut', this.cutHandler);
       this.ro && this.ro.disconnect();
-      clearTimeout(this._saveT); clearTimeout(this._toastT);
+      clearTimeout(this._saveT); clearTimeout(this._toastT); clearTimeout(this._mergeT);
       if (this.opts.storageKey) this.saveLocal();
     },
 
@@ -186,7 +186,7 @@
     setHint(extra) {
       const el = this.root.querySelector('.wb-status'); if (!el) return;
       let h = HINTS[this.tool] || '';
-      if (this.tool === 'eraser' && this.eraserMode === 'object') h = 'Коснитесь фигуры — она удалится целиком. «Штрих» — стирать только часть линии. [ и ] — размер';
+      if (this.tool === 'eraser' && this.eraserMode === 'object') h = 'Коснитесь штриха пера или маркера — он удалится целиком. «Часть» — стирать только задетый кусок. Линии, фигуры и текст не трогает. [ и ] — размер';
       el.innerHTML = `<b>${esc(TOOL_NAMES[this.tool] || this.tool)}</b> · ${esc(extra || h)}`;
     },
 
@@ -197,13 +197,19 @@
       this.root.querySelectorAll('[data-tool]').forEach(x => x.classList.toggle('active', x.dataset.tool === t));
       this.wrap.className = `wb-canvas-wrap ${this.bg} tool-${t}` + (this.spaceDown ? ' space-pan' : '');
       this.wrap.style.cursor = '';
-      const sub = this.subEl;
-      sub.querySelector('.wb-sub-eraser').style.display = t === 'eraser' ? '' : 'none';
+      const sub = this.subEl, er = this.isEraser(t);
+      sub.querySelector('.wb-sub-eraser').style.display = er ? '' : 'none';
       sub.querySelector('.wb-sub-note-color').style.display = t === 'note' ? '' : 'none';
       sub.querySelector('.wb-sub-stamp').style.display = t === 'stamp' ? '' : 'none';
-      sub.classList.toggle('show', t === 'eraser' || t === 'note' || t === 'stamp');
+      sub.classList.toggle('show', er || t === 'note' || t === 'stamp');
+      if (er) {
+        const modes = sub.querySelector('.wb-eraser-modes'); if (modes) modes.style.display = t === 'eraser' ? '' : 'none';
+        const title = sub.querySelector('.wb-eraser-title'); if (title) title.textContent = t === 'eraser' ? 'Ластик для рисунков' : 'Ластик для фигур';
+        const note = sub.querySelector('.wb-eraser-note'); if (note) note.textContent = t === 'eraser' ? 'стирает только перо и маркер · [ и ] — размер · Ctrl+Z — вернуть' : 'удаляет линии, стрелки и фигуры целиком · [ и ] — размер · Ctrl+Z — вернуть';
+        const pv = sub.querySelector('.wb-eraser-preview'); if (pv) pv.classList.toggle('shape', t === 'eraserShape');
+      }
       if (t !== 'move') { this.sel = []; this.marquee = null; }
-      if (t === 'eraser') { if (this.lastMouse) { this.eraserPos = this.lastMouse; this.showEraser(false); } } else this.hideEraser();
+      if (er) { if (this.lastMouse) { this.eraserPos = this.lastMouse; this.showEraser(false); } } else this.hideEraser();
       this.hideLaser();
       this.setHint();
       this.render();
@@ -222,11 +228,11 @@
     },
     showEraser(down) {
       const el = this.eraserEl;
-      if (this.tool !== 'eraser' || !this.eraserPos) { el.classList.remove('show'); return; }
+      if (!this.isEraser() || !this.eraserPos) { el.classList.remove('show'); return; }
       const d = this.eraserSize * 2;
       el.style.width = el.style.height = d + 'px';
       el.style.left = this.eraserPos.x + 'px'; el.style.top = this.eraserPos.y + 'px';
-      el.classList.add('show'); el.classList.toggle('down', !!down);
+      el.classList.add('show'); el.classList.toggle('down', !!down); el.classList.toggle('shape', this.tool === 'eraserShape');
     },
     hideEraser() { this.eraserPos = null; this.eraserEl.classList.remove('show'); },
 
