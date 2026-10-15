@@ -1,7 +1,7 @@
 /* FORMYLA доска v2 — часть модуля, подключается из whiteboard.js */
 (function () {
   'use strict';
-  const { COLORS, SIZES, NOTE_COLORS, STAMPS, PIE_COLORS, TEMPLATES, BGS, FONT, EMOJI_FONT, MIN_ZOOM, MAX_ZOOM, LINE_TYPES, clone, uid, esc, clamp, ic, TOOL_GROUPS, TOOL_NAMES, HINTS, injectCss } = window.__WB;
+  const { COLORS, SIZES, NOTE_COLORS, STAMPS, PIE_COLORS, TEMPLATES, BGS, FONT, EMOJI_FONT, MIN_ZOOM, MAX_ZOOM, LINE_TYPES, GEOM_TYPES, FRESH_MS, clone, uid, esc, clamp, ic, TOOL_GROUPS, TOOL_NAMES, HINTS, injectCss } = window.__WB;
   Object.assign(window.Whiteboard.prototype, {
     /* ---------- меню ---------- */
     closeMenu() { const old = this.root.querySelector('.wb-menu'); if (old) old.remove(); },
@@ -39,14 +39,14 @@
       setTimeout(() => document.addEventListener('pointerdown', off), 0);
     },
     menuAction(a) {
-      if (a === 'addPage') { this.pages.push({ shapes: [], undo: [], redo: [] }); this.page = this.pages.length - 1; this.sel = []; }
-      if (a === 'dupPage') { this.pages.splice(this.page + 1, 0, { shapes: clone(this.shapes), undo: [], redo: [] }); this.page++; this.sel = []; }
+      if (a === 'addPage') { this.pages.push(this.mkPage()); this.page = this.pages.length - 1; this.sel = []; }
+      if (a === 'dupPage') { this.pages.splice(this.page + 1, 0, this.mkPage({ shapes: clone(this.shapes) })); this.page++; this.sel = []; }
       if (a === 'delPage' && this.pages.length > 1) { this.pages.splice(this.page, 1); this.page = Math.max(0, Math.min(this.page, this.pages.length - 1)); this.sel = []; }
       if (a === 'exportPng') this.exportPng();
       if (a === 'exportJson') this.exportJson();
       if (a === 'newBoard') {
         if (!confirm('Создать новую пустую доску? Текущая будет удалена (сначала можно сохранить её в .json).')) return;
-        this.pages = [{ shapes: [], undo: [], redo: [] }]; this.page = 0; this.sel = []; this.zoom = 1; this.panX = 0; this.panY = 0; this.updateZoomLabel();
+        this.replacePages([this.mkPage()]); this.page = 0; this.sel = []; this.zoom = 1; this.panX = 0; this.panY = 0; this.updateZoomLabel();
         this.say('Новая доска создана', 'ok');
       }
       if (a === 'shortcuts') this.showShortcuts();
@@ -58,11 +58,11 @@
       const bd = document.createElement('div'); bd.className = 'wb-backdrop';
       const m = document.createElement('div'); m.className = 'wb-modal';
       const rows = [
-        ['V · пробел', 'Выделение · рука (двигать холст)'], ['P / H / E', 'Перо / маркер / ластик'], ['[ и ]', 'Размер ластика'],
+        ['V · пробел', 'Выделение · рука (двигать холст)'], ['P / H', 'Перо / маркер'], ['E', 'Ластик для рисунков — стирает только перо и маркер'], ['X', 'Ластик для фигур — удаляет линии, стрелки и фигуры целиком'], ['[ и ]', 'Размер ластика'],
         ['L / A / B', 'Линия / стрелка / двойная стрелка'], ['R / O / G / D', 'Прямоугольник / эллипс / треугольник / ромб'],
         ['T / N / M / C / K', 'Текст / стикер / штамп / диаграмма / указка'], ['F', 'Заливка фигур'], ['Shift при рисовании', 'Прямая линия, угол 45°, квадрат/круг'],
         ['Ctrl+Z / Ctrl+Y', 'Отменить / повторить'], ['Ctrl+A', 'Выделить всё'], ['Ctrl+C / X / V', 'Копировать / вырезать / вставить (фигуры, текст, картинки)'],
-        ['Ctrl+D', 'Дублировать выделенное'], ['Delete', 'Удалить выделенное'], ['Стрелки (+Shift)', 'Сдвинуть выделенное на 1 (10) px'],
+        ['Ctrl+D', 'Дублировать выделенное'], ['Delete', 'Удалить выделенное (в том числе текст и стикеры)'], ['Стрелки (+Shift)', 'Сдвинуть выделенное на 1 (10) px'],
         ['Двойной клик', 'Править текст / стикер / данные диаграммы'], ['Esc', 'Снять выделение, отменить действие'],
         ['Ctrl+колесо · + / −', 'Масштаб'], ['Колесо · правая кнопка · Alt+мышь', 'Двигать холст'], ['Shift+1 · 0', 'Показать всё · масштаб 100%'], ['Ctrl+S', 'Сохранить в .json'],
       ];
@@ -72,7 +72,7 @@
       bd.addEventListener('pointerdown', close); m.querySelector('button').addEventListener('click', close);
     },
     renderPages() {
-      const el = this.root.querySelector('.wb-pages');
+      const el = this.root && this.root.querySelector('.wb-pages'); if (!el) return;
       if (this.page > this.pages.length - 1) this.page = this.pages.length - 1;
       el.innerHTML = this.pages.map((_, i) => `<button class="${i === this.page ? 'active' : ''}" data-p="${i}" title="Страница ${i + 1}">${i + 1}</button>`).join('') + `<button data-p="add" title="Новая страница">${ic('plus')}</button>`;
       el.querySelectorAll('button').forEach(b => b.addEventListener('click', () => {

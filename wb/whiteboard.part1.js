@@ -1,7 +1,7 @@
 /* FORMYLA доска v2 — часть модуля, подключается из whiteboard.js */
 (function () {
   'use strict';
-  const { COLORS, SIZES, NOTE_COLORS, STAMPS, PIE_COLORS, TEMPLATES, BGS, FONT, EMOJI_FONT, MIN_ZOOM, MAX_ZOOM, LINE_TYPES, clone, uid, esc, clamp, ic, TOOL_GROUPS, TOOL_NAMES, HINTS, injectCss } = window.__WB;
+  const { COLORS, SIZES, NOTE_COLORS, STAMPS, PIE_COLORS, TEMPLATES, BGS, FONT, EMOJI_FONT, MIN_ZOOM, MAX_ZOOM, LINE_TYPES, GEOM_TYPES, FRESH_MS, clone, uid, esc, clamp, ic, TOOL_GROUPS, TOOL_NAMES, HINTS, injectCss } = window.__WB;
 
   class Whiteboard {
     constructor(root, opts = {}) {
@@ -10,14 +10,17 @@
       this.root = root;
       this.opts = opts;
       this.title = opts.title || 'Доска без названия';
-      this.pages = [{ shapes: [], undo: [], redo: [] }];
+      /* страницы хранятся в this._pages; this.pages — «умный» доступ (см. part5: mergeRemotePages).
+         Присваивание wb.pages = ... снаружи (синхронизация от других участников) сливает состояние с локальным,
+         а не затирает его: свежие локальные штрихи и правки не пропадают из-за запоздавшей чужой синхронизации. */
+      this._pages = [this.mkPage()];
       this.page = 0;
       this.tool = 'pen';
       this.color = COLORS[0];
       this.size = SIZES[1];
       this.fill = false;
-      this.eraserSize = 18;            // радиус ластика в пикселях экрана
-      this.eraserMode = 'stroke';      // 'stroke' — стирать часть линии, 'object' — фигуру целиком
+      this.eraserSize = 18;            // радиус ластика в пикселях экрана (общий для обоих ластиков)
+      this.eraserMode = 'stroke';      // ластик для рисунков: 'stroke' — стирать часть штриха, 'object' — весь штрих
       this.eraserPos = null;
       this.noteColor = NOTE_COLORS[0];
       this.stamp = STAMPS[0];
@@ -40,11 +43,19 @@
       this.render();
     }
 
-    get shapes() { return this.pages[this.page].shapes; }
+    get pages() { return this._pages; }
+    set pages(v) { this.mergeRemotePages(v); }
+    get shapes() { const pg = this._pages[this.page] || this._pages[0]; return pg ? pg._shapes : []; }
     get selected() { return this.sel[0] || null; }
     set selected(s) { this.sel = s ? [s] : []; }
 
+    /* какие инструменты являются ластиками */
+    isEraser(t) { const x = t === undefined ? this.tool : t; return x === 'eraser' || x === 'eraserShape'; }
+    /* что стирает ластик для фигур: ровные линии, стрелки и геометрические фигуры (не перо, не текст, не картинки) */
+    isGeom(s) { return !!(s && GEOM_TYPES[s.type] && !s.points); }
+    /* что стирает ластик для рисунков: штрихи пера и маркера */
+    isStroke(s) { return !!(s && s.points); }
   }
   window.Whiteboard = Whiteboard;
-  Whiteboard.VERSION = '2.0.0';
+  Whiteboard.VERSION = '2.1.0';
 })();
