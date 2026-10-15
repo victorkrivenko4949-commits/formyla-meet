@@ -1,7 +1,7 @@
 /* FORMYLA доска v2 — часть модуля, подключается из whiteboard.js */
 (function () {
   'use strict';
-  const { COLORS, SIZES, NOTE_COLORS, STAMPS, PIE_COLORS, TEMPLATES, BGS, FONT, EMOJI_FONT, MIN_ZOOM, MAX_ZOOM, LINE_TYPES, clone, uid, esc, clamp, ic, TOOL_GROUPS, TOOL_NAMES, HINTS, injectCss } = window.__WB;
+  const { COLORS, SIZES, NOTE_COLORS, STAMPS, PIE_COLORS, TEMPLATES, BGS, FONT, EMOJI_FONT, MIN_ZOOM, MAX_ZOOM, LINE_TYPES, GEOM_TYPES, FRESH_MS, clone, uid, esc, clamp, ic, TOOL_GROUPS, TOOL_NAMES, HINTS, injectCss } = window.__WB;
   Object.assign(window.Whiteboard.prototype, {
     /* ---------- фигуры: границы, попадание, ручки ---------- */
     bounds(s) {
@@ -85,7 +85,7 @@
       if (!this.sel.length) return;
       this.pushUndo();
       const set = new Set(this.sel);
-      this.pages[this.page].shapes = this.shapes.filter(s => !set.has(s));
+      this.setShapes(this.shapes.filter(s => !set.has(s)));
       this.sel = []; this.commit(); this.render(); this.setHint();
     },
     selectAll() { this.setTool('move'); this.sel = this.shapes.slice(); this.render(); if (this.sel.length) this.setHint(`Выделено: ${this.sel.length}`); },
@@ -98,10 +98,15 @@
       this.commit(); this.render();
     },
     serializeSel() { return 'FORMYLA-WB:' + JSON.stringify(this.sel.map(s => clone(s))); },
+    /* e — событие copy/cut (если пришло) или null, когда вызвано по Ctrl+C из onKey */
     copySel(e) {
       if (!this.sel.length) return false;
+      const now = Date.now();
+      if (this._lastCopyT && now - this._lastCopyT < 300) { if (e && e.clipboardData) { e.clipboardData.setData('text/plain', this.clip || ''); e.preventDefault(); } return true; }
+      this._lastCopyT = now;
       const data = this.serializeSel(); this.clip = data;
       if (e && e.clipboardData) { e.clipboardData.setData('text/plain', data); e.preventDefault(); }
+      else if (navigator.clipboard && navigator.clipboard.writeText) { try { navigator.clipboard.writeText(data).catch(() => { }); } catch (err) { } }
       this.say(`Скопировано фигур: ${this.sel.length}`, 'ok', 1500);
       return true;
     },
@@ -117,6 +122,32 @@
       this.setTool('move'); this.sel = made;
       this.commit(); this.render();
       return true;
+    },
+    /* обычный текст из буфера — ставим текстовой фигурой под курсором */
+    pasteText(text) {
+      const t = String(text || '').trim(); if (!t) return false;
+      this.pushUndo();
+      const m = this.lastMouse || this.viewCenter();
+      const c0 = this.toWorld(m.x, m.y);
+      const sh = { id: uid(), type: 'text', x1: c0.x, y1: c0.y, x2: c0.x + 10, y2: c0.y + 10, text: t.slice(0, 4000), color: this.color, size: this.size };
+      this.fitText(sh); this.shapes.push(sh); this.setTool('move'); this.sel = [sh]; this.commit(); this.render();
+      return true;
+    },
+    /* Ctrl+V из onKey: ждём чуть-чуть — если браузер прислал событие paste, оно всё сделало само;
+       иначе читаем системный буфер (если разрешено), а если нет — вставляем из внутреннего буфера доски */
+    pasteFallback() {
+      const t0 = Date.now();
+      setTimeout(() => {
+        if (!this.root.isConnected) return;
+        if (this._lastPasteEvt && this._lastPasteEvt >= t0) return;
+        const done = txt => {
+          if (txt && txt.startsWith('FORMYLA-WB:')) { this.pasteShapes(txt, true); return; }
+          if (this.clip) { this.pasteShapes(this.clip, true); return; }
+          if (txt && txt.trim()) this.pasteText(txt);
+        };
+        if (navigator.clipboard && navigator.clipboard.readText) { try { navigator.clipboard.readText().then(done, () => done(null)); } catch (err) { done(null); } }
+        else done(null);
+      }, 250);
     },
     duplicateSel() { if (!this.sel.length) return; this.pasteN = 0; this.pasteShapes(this.serializeSel(), true); },
 
@@ -139,7 +170,7 @@
         const MAX = 1600;
         if (Math.max(dw, dh) > MAX) {
           const k = MAX / Math.max(dw, dh); dw = Math.round(dw * k); dh = Math.round(dh * k);
-          try { const off = document.createElement('canvas'); off.width = dw; off.height = dh; off.getContext('2d').drawImage(img, 0, 0, dw, dh); url = off.toDataURL(src.startsWith('data:image/png') ? 'image/png' : 'image/jpeg', 0.85); } catch (e) { /* оставляем исходник */ }
+          try { const off = document.createElement('canvas'); off.width = dw; off.height = dh; off.getContext('2d').drawImage(img, 0, 0, dw, dh); url = off.toDataURL(src.startsWith('data:image/png') ? 'image/png' : 'image/jpeg', 0.85); } catch (e) { }
         }
         this.imgFor(url);
         const vc = this.viewCenter();
@@ -156,13 +187,132 @@
       img.src = src;
     },
 
+    /* ---------- страницы: хранение и слияние с чужим состоянием ----------
+       Страница: { shapes (enumerable-свойство с get/set), undo, redo } + скрытые поля:
+         _shapes  — сам массив фигур;
+         _sig     — Map id → подпись фигуры на момент последнего commit/слияния;
+         _touched — Map id → время последнего ЛОКАЛЬНОГО изменения фигуры;
+         _deleted — Map id → время ЛОКАЛЬНОГО удаления фигуры;
+         _created — когда страница создана локально (0 — пришла извне).
+       Внешнее присваивание wb.pages = [...] или page.shapes = [...] (синхронизация из meeting.js) — это слияние:
+         • фигуры, которые мы меняли/создали за последние FRESH_MS, остаются, даже если их нет в пришедшем состоянии
+           (значит, наш commit просто ещё не дошёл до остальных);
+         • фигуры, которые мы недавно удалили, не «воскресают» из устаревшего чужого состояния;
+         • всё остальное берётся из пришедшего состояния (чужие удаления и правки применяются как раньше).
+       Если после слияния наше состояние отличается от пришедшего — через 200 мс делаем commit, чтобы все сошлись. */
+    mkPage(src, fromRemote) {
+      const page = {};
+      const hid = (k, v) => Object.defineProperty(page, k, { value: v, writable: true, enumerable: false, configurable: true });
+      let arr = [];
+      if (src) { if (Array.isArray(src._shapes)) arr = src._shapes; else if (Array.isArray(src.shapes)) arr = src.shapes; }
+      hid('_shapes', arr);
+      hid('_sig', src && src._sig instanceof Map ? src._sig : null);
+      hid('_touched', src && src._touched instanceof Map ? src._touched : new Map());
+      hid('_deleted', src && src._deleted instanceof Map ? src._deleted : new Map());
+      hid('_created', src && typeof src._created === 'number' ? src._created : (fromRemote ? 0 : Date.now()));
+      page.undo = src && Array.isArray(src.undo) ? src.undo : [];
+      page.redo = src && Array.isArray(src.redo) ? src.redo : [];
+      const wb = this;
+      Object.defineProperty(page, 'shapes', { enumerable: true, configurable: true, get() { return page._shapes; }, set(v) { wb.mergePageShapes(page, v); } });
+      return page;
+    },
+    /* полная замена страниц (своя операция: новая доска, импорт из файла) — без слияния */
+    replacePages(arr) {
+      const list = (Array.isArray(arr) && arr.length ? arr : [null]).map(p => this.mkPage(p));
+      this._pages = list;
+      if (this.page > list.length - 1) this.page = list.length - 1;
+      if (this.page < 0) this.page = 0;
+    },
+    /* замена фигур текущей страницы (своя операция: undo, redo, удаление, очистка) — без слияния */
+    setShapes(arr, pageIndex) {
+      const pg = this._pages[pageIndex == null ? this.page : pageIndex]; if (!pg) return;
+      pg._shapes = Array.isArray(arr) ? arr : [];
+    },
+    sig(s) {
+      if (!s) return '';
+      return `${s.type}|${s.x1}|${s.y1}|${s.x2}|${s.y2}|${s.color}|${s.size}|${s.fill ? 1 : 0}|${s.text || ''}|${s.points ? s.points.length : 0}|${s.noteColor || ''}|${s.bg || ''}|${s.chartType || ''}|${s.title || ''}|${s.data ? s.data.length : 0}`;
+    },
+    sigMap(arr) { const m = new Map(); (arr || []).forEach(s => { if (s && s.id != null) m.set(s.id, this.sig(s)); }); return m; },
+    /* вызывается из commit(): запоминаем, какие фигуры мы только что изменили/создали/удалили */
+    trackLocal(pg) {
+      if (!pg) return;
+      const now = Date.now(), cur = this.sigMap(pg._shapes), prev = pg._sig;
+      if (prev) {
+        for (const [id, sg] of cur) if (prev.get(id) !== sg) { pg._touched.set(id, now); pg._deleted.delete(id); }
+        for (const id of prev.keys()) if (!cur.has(id)) { pg._deleted.set(id, now); pg._touched.delete(id); }
+      } else { for (const id of cur.keys()) pg._touched.set(id, now); }
+      pg._sig = cur;
+      const prune = m => { if (m.size > 400) for (const [id, t] of m) if (now - t > FRESH_MS) m.delete(id); };
+      prune(pg._touched); prune(pg._deleted);
+    },
+    /* слияние одной страницы с пришедшим списком фигур; возвращает true, если наше состояние отличается от пришедшего */
+    mergeShapes(page, incoming) {
+      const inc = Array.isArray(incoming) ? incoming : [];
+      const loc = page._shapes || [];
+      if (inc === loc) return false;
+      const now = Date.now();
+      const fresh = id => { const t = page._touched.get(id); return !!t && now - t < FRESH_MS; };
+      const delFresh = id => { const t = page._deleted.get(id); return !!t && now - t < FRESH_MS; };
+      const byId = new Map(); loc.forEach(s => { if (s && s.id != null) byId.set(s.id, s); });
+      const out = [], seen = new Set(); let diverged = false;
+      for (const s of inc) {
+        if (!s || typeof s !== 'object') continue;
+        if (s.id == null) { out.push(s); continue; }
+        if (delFresh(s.id)) { diverged = true; continue; }
+        const l = byId.get(s.id);
+        if (!l) { out.push(s); continue; }
+        seen.add(s.id);
+        if (l !== s) {
+          if (fresh(s.id)) { if (this.sig(l) !== this.sig(s)) diverged = true; }
+          else { for (const k of Object.keys(l)) delete l[k]; Object.assign(l, s); }   // сохраняем объект (выделение, правка текста не слетают)
+        }
+        out.push(l);
+      }
+      loc.forEach(l => { if (l && l.id != null && !seen.has(l.id) && fresh(l.id)) { out.push(l); diverged = true; } });
+      page._shapes = out;
+      page._sig = this.sigMap(out);
+      return diverged;
+    },
+    mergeRemotePages(incoming) {
+      const inc = Array.isArray(incoming) && incoming.length ? incoming : [{ shapes: [] }];
+      const local = this._pages || [];
+      if (inc === local) return;
+      const now = Date.now(); const out = []; let diverged = false;
+      for (let i = 0; i < Math.max(inc.length, local.length); i++) {
+        const lp = local[i], ip = inc[i];
+        if (!ip) { if (lp && lp._created && now - lp._created < FRESH_MS) { out.push(lp); diverged = true; } continue; }
+        /* если нам отдали нашу же страницу (пересоздание доски в meeting.js: wb.pages = saved.pages), берём её вместе с историей свежих правок */
+        let page = lp;
+        if (ip && ip._touched instanceof Map && (!lp || !lp._shapes.length)) page = this.mkPage(ip);
+        else if (!lp) page = this.mkPage(null, true);
+        const shapes = ip && Array.isArray(ip._shapes) ? ip._shapes : (ip && Array.isArray(ip.shapes) ? ip.shapes : []);
+        if (this.mergeShapes(page, shapes)) diverged = true;
+        out.push(page);
+      }
+      this._pages = out;
+      this.afterMerge(diverged);
+    },
+    mergePageShapes(page, v) {
+      const diverged = this.mergeShapes(page, v);
+      this.afterMerge(diverged);
+    },
+    afterMerge(diverged) {
+      if (this.page > this._pages.length - 1) this.page = this._pages.length - 1;
+      if (this.page < 0) this.page = 0;
+      const cur = this.shapes;
+      this.sel = this.sel.filter(s => cur.includes(s));
+      if (this.resizing && !cur.includes(this.resizing.shape)) this.resizing = null;
+      if (this.wrap) { this.renderPages(); this.render(); }
+      if (diverged) { clearTimeout(this._mergeT); this._mergeT = setTimeout(() => { this._mergeT = null; this.commit(); }, 200); }
+    },
+
     /* ---------- история ---------- */
-    pushUndo() { const pg = this.pages[this.page]; pg.undo.push(JSON.stringify(pg.shapes)); if (pg.undo.length > 80) pg.undo.shift(); pg.redo = []; },
-    popUndo() { const pg = this.pages[this.page]; pg.undo.pop(); },
-    undo() { const pg = this.pages[this.page]; if (!pg.undo.length) { this.say('Отменять нечего', 'info', 1200); return; } pg.redo.push(JSON.stringify(pg.shapes)); pg.shapes = JSON.parse(pg.undo.pop()); this.sel = []; this.commit(); this.render(); },
-    redo() { const pg = this.pages[this.page]; if (!pg.redo.length) return; pg.undo.push(JSON.stringify(pg.shapes)); pg.shapes = JSON.parse(pg.redo.pop()); this.sel = []; this.commit(); this.render(); },
-    clearPage() { if (!this.shapes.length) return; this.pushUndo(); this.pages[this.page].shapes = []; this.sel = []; this.commit(); this.render(); this.say('Страница очищена. Ctrl+Z — вернуть', 'ok', 2500); },
-    commit() { this.opts.onChange && this.opts.onChange(); this.scheduleSave(); },
+    pushUndo() { const pg = this._pages[this.page]; pg.undo.push(JSON.stringify(pg._shapes)); if (pg.undo.length > 80) pg.undo.shift(); pg.redo = []; },
+    popUndo() { const pg = this._pages[this.page]; pg.undo.pop(); },
+    undo() { const pg = this._pages[this.page]; if (!pg.undo.length) { this.say('Отменять нечего', 'info', 1200); return; } pg.redo.push(JSON.stringify(pg._shapes)); pg._shapes = JSON.parse(pg.undo.pop()); this.sel = []; this.commit(); this.render(); },
+    redo() { const pg = this._pages[this.page]; if (!pg.redo.length) return; pg.undo.push(JSON.stringify(pg._shapes)); pg._shapes = JSON.parse(pg.redo.pop()); this.sel = []; this.commit(); this.render(); },
+    clearPage() { if (!this.shapes.length) return; this.pushUndo(); this.setShapes([]); this.sel = []; this.commit(); this.render(); this.say('Страница очищена. Ctrl+Z — вернуть', 'ok', 2500); },
+    commit() { this.trackLocal(this._pages[this.page]); this.opts.onChange && this.opts.onChange(); this.scheduleSave(); },
 
     /* ---------- автосохранение в браузере ---------- */
     scheduleSave() { if (!this.opts.storageKey) return; clearTimeout(this._saveT); this._saveT = setTimeout(() => this.saveLocal(), 400); },
@@ -177,12 +327,12 @@
         const raw = localStorage.getItem(this.opts.storageKey); if (!raw) return;
         const d = JSON.parse(raw);
         if (d && Array.isArray(d.pages) && d.pages.length) {
-          this.pages = d.pages.map(p => ({ shapes: Array.isArray(p.shapes) ? p.shapes : [], undo: [], redo: [] }));
-          this.page = clamp(d.page || 0, 0, this.pages.length - 1);
+          this._pages = d.pages.map(p => this.mkPage({ shapes: Array.isArray(p.shapes) ? p.shapes : [] }));
+          this.page = clamp(d.page || 0, 0, this._pages.length - 1);
           this.title = d.title || this.title; this.bg = d.bg || this.bg;
           this.zoom = clamp(d.zoom || 1, MIN_ZOOM, MAX_ZOOM); this.panX = d.panX || 0; this.panY = d.panY || 0;
         }
-      } catch (e) { /* повреждённые данные игнорируем */ }
+      } catch (e) { }
     },
   });
 })();
