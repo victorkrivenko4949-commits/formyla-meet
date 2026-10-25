@@ -87,7 +87,7 @@ meet_css += '#fm {\n' + reset + '\n' + '\n'.join(n1 + n2) + '\n}\n\n'
 meet_css += '/* Правила уровня body */\n' + '\n'.join(g1 + g2) + '\n'
 (OUT / 'static' / 'meet' / 'meet.css').write_text(meet_css)
 
-for js in ['icons.js', 'whiteboard.js', 'sim.js', 'rtc.js', 'meeting.js', 'app.js']:
+for js in ['icons.js', 'whiteboard.js', 'sim.js', 'rtc.js', 'meeting.js', 'chat_images.js', 'app.js']:
     shutil.copy(ROOT / js, OUT / 'static' / 'meet' / js)
 
 # ---------- шаблон ----------
@@ -126,6 +126,7 @@ template = '''{% extends "base.html" %}
 <script src="{{ url_for('static', filename='meet/sim.js') }}?v={{ asset_version }}"></script>
 <script src="{{ url_for('static', filename='meet/rtc.js') }}?v={{ asset_version }}"></script>
 <script src="{{ url_for('static', filename='meet/meeting.js') }}?v={{ asset_version }}"></script>
+<script src="{{ url_for('static', filename='meet/chat_images.js') }}?v={{ asset_version }}"></script>
 <script src="{{ url_for('static', filename='meet/app.js') }}?v={{ asset_version }}"></script>
 {% endblock %}
 '''
@@ -161,7 +162,7 @@ def meet_page():
 |---|---|
 | `templates/meet.html` | `templates/meet.html` (новый файл, наследует `base.html`) |
 | `static/meet/meet.css` | `static/meet/meet.css` |
-| `static/meet/icons.js`, `whiteboard.js`, `sim.js`, `rtc.js`, `meeting.js`, `app.js` | `static/meet/` |
+| `static/meet/icons.js`, `whiteboard.js`, `sim.js`, `rtc.js`, `meeting.js`, `chat_images.js`, `app.js` | `static/meet/` |
 | `server/server.js`, `server/package.json` | отдельный сервис встреч (Node.js), см. ниже — на сайт копировать не нужно |
 | `SNIPPET_app_py.txt` | маршрут `/meet` — вставить в `app.py` после `misc_page()` |
 | `SNIPPET_misc_html.txt` | строка раздела — вставить в `templates/misc.html`, группа «🛠️ Инструменты» |
@@ -202,7 +203,7 @@ def meet_page():
 2. В app.py сразу после функции misc_page() добавь маршрут из SNIPPET_app_py.txt (GET /meet → render_template('meet.html')).
 3. В templates/misc.html в группу «🛠️ Инструменты» после строки с «💡 Банк неточностей» вставь .misc-row из SNIPPET_misc_html.txt.
 4. Ничего больше не меняй: base.html, nav.js, стили сайта и другие шаблоны не трогать.
-5. Перед коммитом покажи список добавленных и изменённых файлов (только: 7 файлов в static/meet, templates/meet.html, app.py, templates/misc.html — итого 10 путей; папку server/ на сайт не копировать). Убедись, что в коммит не попали .env, дампы и логи.
+5. Перед коммитом покажи список добавленных и изменённых файлов (только: 8 файлов в static/meet, templates/meet.html, app.py, templates/misc.html — итого 11 путей; папку server/ на сайт не копировать). Убедись, что в коммит не попали .env, дампы и логи.
 6. Проверь: flask запускается, GET /meet возвращает 200, на /misc есть ссылка «🎥 Видеовстречи», в консоли браузера на /meet нет ошибок.
 ```
 ''')
