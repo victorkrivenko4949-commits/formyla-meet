@@ -33,16 +33,23 @@
     const img = lb.querySelector('img'); img.src = src;
     lb.querySelector('.lb-name').textContent = name || 'Изображение';
     const dl = lb.querySelector('.lb-dl'); dl.href = src; dl.download = name || 'image.png';
-    const close = () => { lb.remove(); document.removeEventListener('keydown', onKey); };
-    const onKey = e => { if (e.key === 'Escape') close(); };
+    const close = () => { lb.remove(); document.removeEventListener('keydown', onKey, true); };
+    const onKey = e => {
+      if (e.key !== 'Escape') return;
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      close();
+    };
     lb.addEventListener('click', e => { if (e.target === lb || e.target.closest('.lb-close')) close(); });
-    document.addEventListener('keydown', onKey);
+    document.addEventListener('keydown', onKey, true);
     document.body.appendChild(lb);
   }
 
   function enhance(root) {
     const scope = root || document;
-    scope.querySelectorAll('.chat-msg a[href]').forEach(a => {
+    // Only the original attachment is eligible. The preview is an anchor
+    // too, so scanning all links repeatedly created previews of previews.
+    scope.querySelectorAll('.chat-msg a.file[download][href]').forEach(a => {
       if (a.dataset.imgDone) return;
       if (!isImageLink(a)) return;
       a.dataset.imgDone = '1'; a.classList.add('is-image');
